@@ -98,11 +98,62 @@ screened contact regions:
 Units follow the original code throughout: lengths in nm, energies and
 potentials in eV, temperature in Kelvin.
 
+### Validity of the model — read before trusting a number
+
+Each approximation below is documented in more detail (with the reasoning
+and, where relevant, a test demonstrating it) in the corresponding source
+module's doc comments.
+
+- **Natural-length electrostatics** (`device.rs`) assumes a thin body with a
+  parabolic transverse potential profile. Reasonable for thin-body/
+  double-gate/gate-all-around MOSFETs; not valid for bulk (thick-body)
+  devices. It is also a classical (non-quantized) transverse charge model,
+  in tension with the fully-quantized longitudinal NEGF treatment — this is
+  a first-order, not a fully self-consistent 2D, model.
+- **Ballistic Landauer current** (`device.rs`) assumes perfect transmission
+  above the channel barrier and zero below it: no scattering, no
+  sub-barrier tunneling. Good for short channels well below the carrier
+  mean free path; overestimates on-current and underestimates subthreshold
+  current otherwise.
+- **Effective-mass, single-valley, parabolic band** (`m_eff`, used for both
+  the ballistic hopping parameter and the NEGF tight-binding parameter):
+  real silicon has multiple equivalent valleys and a non-parabolic band
+  away from the edge; `m_eff` is a single fitting parameter standing in for
+  both, so absolute currents should be read as illustrative trends rather
+  than device-accurate predictions.
+- **Tight-binding NEGF discretization** (`negf.rs`) reproduces the continuum
+  parabolic dispersion only for grid spacings fine enough that the swept
+  energy range stays well below the chain's `4*t_hop` bandwidth; worth
+  checking via a grid-refinement test at new device scales.
+- **Contact self-energy sign — inherited bug, now fixed.** The original
+  MATLAB's self-energy formula (`sigma = t_hop * exp(i*k*a)`) had the
+  opposite sign from what a causal/absorbing contact requires (`Im(sigma)
+  <= 0`, needed for the broadening `Gamma = -2*Im(sigma)` to be
+  non-negative). This rewrite now uses `sigma = t_hop * exp(-i*k*a)`
+  instead, the algebraically-equivalent-but-correctly-signed form for the
+  wavevector branch this code computes — see `negf.rs` for the full
+  derivation. The fix required no changes to `charge.rs`'s charge-density
+  formula (it only uses `sin(k)`, invariant under the branch/sign fix) and
+  did not change the self-consistent loop's convergence behavior or
+  default `eta`/`mixing` (re-verified after the fix; if anything the loop
+  now converges in fewer iterations, consistent with the contacts being
+  genuinely dissipative rather than borderline non-causal).
+- **No explicit spin-degeneracy factor** in the self-consistent charge
+  density (unlike `calc_current`'s explicit `2e/h`), carried over unchanged
+  from the original `calc_n`, which was never exercised against a
+  reference before this rewrite closed the feedback loop.
+
+None of the above are believed to affect the qualitative trends the test
+suite checks (current increasing with gate/drain bias, self-consistent
+convergence to a stable, non-negative charge density) — but they mean
+absolute numbers out of this model should be treated as illustrative of
+device physics concepts, not as device-accurate predictions.
+
 ## Deviations from the original MATLAB code
 
-The user requested a faithful port plus closing the missing
-self-consistency loop, not a from-scratch physics redesign. Everything
-below is a deliberate, documented decision, not an accident:
+This is a faithful port plus closing the missing self-consistency loop,
+not a from-scratch physics redesign. Everything below is a deliberate,
+documented decision, not an accident:
 
 1. **Self-consistent Poisson&harr;NEGF loop** (`selfconsistent.rs`). The
    original computed the electrostatic potential once with `rho = 0` and,
@@ -159,15 +210,31 @@ below is a deliberate, documented decision, not an accident:
    performance change (validated against a dense reference solver in
    tests); the physics is unchanged.
 
+6. **Contact self-energy sign fix** (`negf.rs`). The original's
+   `t*exp(1i*k_sa)` self-energy had `Im(sigma) > 0` for propagating contact
+   modes — the wrong sign for a causal, absorbing lead (which requires
+   `Im(sigma) <= 0`). This surfaced as the local-density-of-states proxy
+   `g_diag` going materially negative at the broadening used inside the
+   self-consistent loop, which a correctly causal calculation cannot do.
+   Fixed to `t*exp(-1i*k_sa)`, which is exactly the standard textbook
+   self-energy for the wavevector branch this code computes (see `negf.rs`
+   for the derivation) — confirmed by two regression tests
+   (`contact_self_energy_has_non_positive_imaginary_part_for_propagating_modes`,
+   `g_diag_is_non_negative_at_self_consistent_loop_broadening`). The
+   self-consistent charge density (`charge::electron_density`) was already
+   structurally non-negative before this fix (it only uses squared
+   Green's-function magnitudes), so this fix changes the *quantitative*
+   values of the NEGF Green's functions (and hence the charge density and
+   any LDOS plots) but not their sign or the qualitative device trends.
+
 Everything else — the electrostatic operator, the ballistic current
-formula, the contact self-energy sign convention, the general unit
-handling (nm/eV/K) — is a direct, unmodified port. In particular, the
-model's overall dimensional consistency is inherited as-is from the
-original teaching code (e.g. the electrostatic equation isn't a fully
-rigorous SI-unit Poisson equation); this rewrite does not attempt to
-re-derive the model's physics from first principles, only to make it run,
-close its one clearly-missing feedback loop, and fix the bugs that stood
-in the way of that loop actually doing something.
+formula, the general unit handling (nm/eV/K) — is a direct, unmodified
+port. In particular, the model's overall dimensional consistency is
+inherited as-is from the original teaching code (e.g. the electrostatic
+equation isn't a fully rigorous SI-unit Poisson equation); this rewrite
+does not attempt to re-derive the model's physics from first principles,
+only to make it run, close its one clearly-missing feedback loop, and fix
+the bugs that stood in the way of that loop actually doing something.
 
 ## Testing
 

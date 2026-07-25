@@ -15,6 +15,37 @@
 //! temperature in Kelvin. `Psi_g`/`Psi_bi`/`Psi_f` store *potential energy*
 //! (already in eV), not electrostatic potential in volts — consistent with
 //! `E_f`/`E_g` also being in eV.
+//!
+//! ## Validity of the approximations
+//!
+//! - **Natural-length electrostatics** (see [`Device::compute_lambda`]) is a
+//!   thin-body/double-gate compact-model reduction of the full 2D/3D Poisson
+//!   equation. It assumes the transverse potential profile is parabolic
+//!   (valid when the body is thin compared to the channel length) and breaks
+//!   down for bulk (thick-body) MOSFETs, where the transverse charge
+//!   distribution is not well approximated by a single decay length. It is
+//!   also a *classical* charge model in the transverse direction — it does
+//!   not resolve transverse-mode (subband) quantization from confinement in
+//!   `d_ch`, unlike the longitudinal NEGF treatment in `negf.rs`.
+//! - **Ballistic (Landauer) current** ([`Device::calc_current`]) assumes
+//!   perfect transmission (`T = 1`) for every state above the barrier top
+//!   (`psi_0`) and zero transmission below it — i.e. no scattering
+//!   (phonon/impurity/surface-roughness) anywhere in the channel, and no
+//!   sub-barrier tunneling. This is the "top-of-the-barrier" thermionic
+//!   -emission limit; it is a good approximation only when the channel is
+//!   short compared to the carrier mean free path, and it overestimates
+//!   current (and underestimates subthreshold current, since tunneling is
+//!   excluded) for longer or more heavily doped channels.
+//! - **Effective-mass, single-valley, parabolic band** (`m_eff`, used in
+//!   `t_hop` here and in the NEGF hopping parameter). Real silicon has
+//!   multiple equivalent conduction-band valleys (a valley-degeneracy factor
+//!   this model does not include) and a non-parabolic dispersion away from
+//!   the band edge; `m_eff` is a single fitting parameter standing in for
+//!   both effects, so results should be read as illustrating trends, not as
+//!   quantitatively predicting absolute currents for a specific real device.
+//!   Spin degeneracy *is* included, via the explicit factor of 2 in
+//!   `calc_current`'s `2*e/h` prefactor (the standard single-mode Landauer
+//!   conductance quantum).
 
 use crate::constants::{E, EPS_0, H_BAR, K_B, M_E};
 use crate::tridiag;
@@ -163,6 +194,11 @@ impl Device {
         device
     }
 
+    /// `lambda = sqrt(k_si/k_ox * d_ch * d_ox / geo)`, the scale length over
+    /// which source/drain potentials leak into the channel (see module
+    /// docs). Only meaningful in the thin-body regime this formula was
+    /// derived for; not a substitute for a full Poisson solve when `d_ch` is
+    /// not small compared to `l_ch`.
     fn compute_lambda(params: &DeviceParams) -> f64 {
         (params.k_si / params.k_ox * params.d_ch * params.d_ox / params.geo).sqrt()
     }
@@ -234,6 +270,11 @@ impl Device {
     /// Ballistic Landauer current for the current potential profile.
     /// Mirrors `calc_current()`. Units match the original scaling
     /// convention (see `legacy_matlab/README.md`).
+    ///
+    /// Integrates `T(E) * [f_s(E) - f_d(E)]` over `E` with `T(E)` implicitly
+    /// `1` for `E >= psi_0` (the barrier top) and `0` below it — see the
+    /// "Ballistic (Landauer) current" note in the module docs for when this
+    /// no-scattering, no-tunneling approximation is (and isn't) reasonable.
     pub fn calc_current(&self) -> f64 {
         let f_s = |e: f64| 1.0 / (((e - self.params.e_fs) * E / (K_B * self.params.t)).exp() + 1.0);
         let f_d = |e: f64| 1.0 / (((e - self.e_fd) * E / (K_B * self.params.t)).exp() + 1.0);

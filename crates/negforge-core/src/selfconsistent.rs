@@ -32,6 +32,25 @@
 //! `N_dot` (fixed dopant charge) is left as-is (default zero); if it is
 //! used with a nonzero value it should be supplied in the same C/m^3 units
 //! for consistency.
+//!
+//! ## Validity: mixing, tolerance, and convergence are numerical, not physical
+//!
+//! `mixing` (linear/Picard mixing of the charge-density update) and `eta`
+//! are numerical stabilization knobs, not physical parameters: they affect
+//! *whether and how fast* the iteration converges, not what it converges
+//! to (a true fixed point of Poisson<->NEGF is independent of both). `eta`
+//! in particular still needs to be several times the energy-grid spacing
+//! `d_e` even with a correctly-signed contact self-energy (see
+//! `negf::DEFAULT_ETA`'s docs) — that requirement comes from resolving
+//! sharp resonances smoothly across iterations, not from compensating for
+//! any sign error. A run that fails to converge (`NotConverged`) is not
+//! evidence the device physics is invalid — it may just need more
+//! `max_iterations`, a smaller `mixing`, or a larger `eta`. Conversely,
+//! convergence is a necessary but not sufficient condition for physical
+//! correctness: a converged fixed point still inherits every approximation
+//! described in `device.rs`, `negf.rs` and `charge.rs` (ballistic
+//! transport, natural-length electrostatics, no explicit spin-degeneracy
+//! factor in the charge density, etc.).
 
 use crate::charge;
 use crate::constants::E as ELEMENTARY_CHARGE;
@@ -181,7 +200,15 @@ mod tests {
         let result = solve_self_consistent(&mut device, &opts).expect("should converge");
         assert!(result.residual < opts.tolerance);
         assert_eq!(result.electron_density.len(), device.n);
-        assert!(result.electron_density.iter().all(|v| v.is_finite()));
+        // Structurally guaranteed (electron_density is a sum of |G|^2-weighted
+        // terms, see charge.rs) regardless of the contact self-energy sign
+        // convention in negf.rs — worth locking in as a regression check
+        // since it's the one physical positivity requirement the loop
+        // actually depends on.
+        assert!(result
+            .electron_density
+            .iter()
+            .all(|v| v.is_finite() && *v >= 0.0));
         assert!(device.psi_f.iter().all(|v| v.is_finite()));
     }
 
