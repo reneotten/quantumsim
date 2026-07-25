@@ -125,19 +125,19 @@ module's doc comments.
   parabolic dispersion only for grid spacings fine enough that the swept
   energy range stays well below the chain's `4*t_hop` bandwidth; worth
   checking via a grid-refinement test at new device scales.
-- **Contact self-energy sign — a known, inherited issue.** The self-energy
-  formula ported unchanged from the original MATLAB (`sigma = t_hop *
-  exp(i*k*a)`) has the opposite sign from what a causal/absorbing contact
-  requires (`Im(sigma) <= 0`); confirmed directly in `negf.rs`'s tests. The
-  quantity that actually feeds the self-consistent loop
-  (`charge::electron_density`) stays non-negative regardless, since it only
-  ever uses squared Green's-function magnitudes — but its absolute
-  magnitude, and any local-density-of-states values read from `g_diag`
-  (which *does* go visibly negative at the loop's broadening), are not
-  verified against a correctly-signed reference calculation. This is
-  flagged rather than silently fixed, since correcting it would change the
-  self-consistent loop's numerical behavior and is outside this rewrite's
-  "faithful port" scope — see `negf.rs` for the full analysis.
+- **Contact self-energy sign — inherited bug, now fixed.** The original
+  MATLAB's self-energy formula (`sigma = t_hop * exp(i*k*a)`) had the
+  opposite sign from what a causal/absorbing contact requires (`Im(sigma)
+  <= 0`, needed for the broadening `Gamma = -2*Im(sigma)` to be
+  non-negative). This rewrite now uses `sigma = t_hop * exp(-i*k*a)`
+  instead, the algebraically-equivalent-but-correctly-signed form for the
+  wavevector branch this code computes — see `negf.rs` for the full
+  derivation. The fix required no changes to `charge.rs`'s charge-density
+  formula (it only uses `sin(k)`, invariant under the branch/sign fix) and
+  did not change the self-consistent loop's convergence behavior or
+  default `eta`/`mixing` (re-verified after the fix; if anything the loop
+  now converges in fewer iterations, consistent with the contacts being
+  genuinely dissipative rather than borderline non-causal).
 - **No explicit spin-degeneracy factor** in the self-consistent charge
   density (unlike `calc_current`'s explicit `2e/h`), carried over unchanged
   from the original `calc_n`, which was never exercised against a
@@ -210,15 +210,31 @@ documented decision, not an accident:
    performance change (validated against a dense reference solver in
    tests); the physics is unchanged.
 
+6. **Contact self-energy sign fix** (`negf.rs`). The original's
+   `t*exp(1i*k_sa)` self-energy had `Im(sigma) > 0` for propagating contact
+   modes — the wrong sign for a causal, absorbing lead (which requires
+   `Im(sigma) <= 0`). This surfaced as the local-density-of-states proxy
+   `g_diag` going materially negative at the broadening used inside the
+   self-consistent loop, which a correctly causal calculation cannot do.
+   Fixed to `t*exp(-1i*k_sa)`, which is exactly the standard textbook
+   self-energy for the wavevector branch this code computes (see `negf.rs`
+   for the derivation) — confirmed by two regression tests
+   (`contact_self_energy_has_non_positive_imaginary_part_for_propagating_modes`,
+   `g_diag_is_non_negative_at_self_consistent_loop_broadening`). The
+   self-consistent charge density (`charge::electron_density`) was already
+   structurally non-negative before this fix (it only uses squared
+   Green's-function magnitudes), so this fix changes the *quantitative*
+   values of the NEGF Green's functions (and hence the charge density and
+   any LDOS plots) but not their sign or the qualitative device trends.
+
 Everything else — the electrostatic operator, the ballistic current
-formula, the contact self-energy sign convention, the general unit
-handling (nm/eV/K) — is a direct, unmodified port. In particular, the
-model's overall dimensional consistency is inherited as-is from the
-original teaching code (e.g. the electrostatic equation isn't a fully
-rigorous SI-unit Poisson equation); this rewrite does not attempt to
-re-derive the model's physics from first principles, only to make it run,
-close its one clearly-missing feedback loop, and fix the bugs that stood
-in the way of that loop actually doing something.
+formula, the general unit handling (nm/eV/K) — is a direct, unmodified
+port. In particular, the model's overall dimensional consistency is
+inherited as-is from the original teaching code (e.g. the electrostatic
+equation isn't a fully rigorous SI-unit Poisson equation); this rewrite
+does not attempt to re-derive the model's physics from first principles,
+only to make it run, close its one clearly-missing feedback loop, and fix
+the bugs that stood in the way of that loop actually doing something.
 
 ## Testing
 

@@ -39,49 +39,73 @@
 //! `a` and confirming the results are unchanged) before trusting results at
 //! a new device scale.
 //!
-//! ## Contact self-energy sign: a known, inherited issue, not a rewrite bug
+//! ## Contact self-energies: derivation, and a corrected sign
 //!
-//! `sigma_l = t_hop * exp(i*k_sa)` (and similarly for the drain) is ported
-//! unchanged from `calc_green()`'s `self.H(1) = c1 + t*exp(1i*k_sa)`. For a
-//! properly causal/absorbing contact — one that only lets particles escape
-//! into the lead rather than come back out of it — the retarded self-energy
-//! must satisfy `Im(sigma) <= 0` (equivalently, the broadening `Gamma =
-//! -2*Im(sigma)` must be non-negative). This formula gives `Im(sigma) =
-//! t_hop * sin(k*a) > 0` for every propagating contact mode — the *wrong*
-//! sign for that requirement, confirmed directly in
-//! `tests::contact_self_energy_has_positive_imaginary_part_for_propagating_modes`
-//! below. This is not a relabeling that washes out elsewhere: it was
-//! checked empirically (`tests::g_diag_can_go_negative_at_self_consistent_loop_broadening`)
-//! and `g_diag`, the `+Im(G)/a` local-density-of-states proxy, does go
-//! materially negative — unphysical for a real density of states — at the
-//! broadenings actually used inside the self-consistent loop, not just as
-//! floating-point noise at isolated points.
+//! The source and drain are modeled as semi-infinite continuations of the
+//! same tight-binding chain (on-site `2*t_hop + Psi_f(contact)`, hopping
+//! `-t_hop`), held in local equilibrium at their own Fermi level. Attaching
+//! a semi-infinite lead to a boundary site is equivalent to adding a
+//! *self-energy* `Sigma(E)` to that site's on-site energy, replacing the
+//! (infinite) lead with a finite, energy-dependent boundary condition. For
+//! this 1D chain the surface Green's function of the lead is known in
+//! closed form, and the standard result (e.g. Datta, *Quantum Transport*,
+//! §8.2–8.3) is
 //!
-//! Two things limit the practical damage:
+//! ```text
+//! Sigma(E) = -t_hop * exp(i * k(E) * a)
+//! ```
 //!
-//! - [`crate::charge::electron_density`], the quantity actually fed back
-//!   into the electrostatic solve, only ever uses `|G_{i,1}|^2` /
-//!   `|G_{i,N}|^2` (squared magnitudes), which are non-negative by
-//!   construction regardless of this sign question. So the self-consistent
-//!   loop cannot be handed a negative charge density because of this
-//!   specific issue.
-//! - `g_diag` itself is otherwise unused outside of LDOS-style plotting (it
-//!   is not consumed by `charge.rs` or `selfconsistent.rs`).
+//! where `k(E)` solves the lead's own bulk dispersion `E = 2*t_hop*(1 -
+//! cos(k*a)) + Psi_f(contact)`, taking the branch `k*a in [0, pi]` for
+//! energies inside the propagating band (`Psi_f(contact) <= E <=
+//! Psi_f(contact) + 4*t_hop`). The code below instead computes
 //!
-//! What is *not* ruled out: since `g_col_source`/`g_col_drain` are computed
-//! from the same (wrong-signed) self-energy, their magnitudes — and hence
-//! `electron_density`'s quantitative values, and any resonance line-shapes
-//! read off `g_diag` — are not verified to match a correctly-signed
-//! calculation. It's plausible this is *why* the self-consistent loop needs
-//! an empirically-tuned `eta` (~0.08, much larger than a physical dephasing
-//! rate) to converge at all: a large enough artificial `eta` keeps the
-//! total effective damping positive despite the contacts contributing
-//! negative damping, masking rather than fixing the underlying sign issue.
-//! This is inherited unchanged from `quantumsim.m` (not introduced by this
-//! rewrite) and is flagged here as a known open question rather than
-//! silently fixed, since correcting it would change the self-consistent
-//! loop's numerical behavior (and likely its tuned defaults) and is outside
-//! the "faithful port" scope described in the top-level README.
+//! ```text
+//! ka_s = acos(-(2*t_hop - E + Psi_f(contact)) / (2*t_hop))
+//! ```
+//!
+//! which is *not* `k(E)*a` from that dispersion relation — algebraically it
+//! is `pi - k(E)*a`, the reflection of the correct branch. Composed with a
+//! `+i` in the exponent (as `calc_green()`'s original `t*exp(1i*k_sa)`
+//! did), that reflection flips the sign of the self-energy's real part
+//! *and* gives it the wrong-signed imaginary part; composed with `-i`
+//! instead, the `pi` phase and the branch reflection cancel out exactly:
+//!
+//! ```text
+//! t_hop * exp(-i * ka_s) = t_hop * exp(-i*(pi - k(E)*a))
+//!                         = t_hop * exp(-i*pi) * exp(i*k(E)*a)
+//!                         = -t_hop * exp(i*k(E)*a)   =  Sigma(E)
+//! ```
+//!
+//! So `sigma_l = t_hop * exp(-i * ka_s)` (implemented below) is exactly the
+//! textbook self-energy, without needing to touch the `ka_s`/`ka_d`
+//! formulas or any other consumer of them — `sin(ka_s)` (used for the
+//! broadening factor in `crate::charge::electron_density`) is unchanged by
+//! the reflection (`sin(pi - x) = sin(x)`), and `k_sa`/`k_da` are still
+//! reported in the code's original (reflected) branch for anyone consuming
+//! them directly.
+//!
+//! **Why this matters, concretely.** A causal, absorbing (as opposed to
+//! amplifying) contact requires `Im(Sigma) <= 0`, so that the broadening
+//! `Gamma = -2*Im(Sigma) >= 0`. The original `+i` formula gave `Im(Sigma) =
+//! +t_hop*sin(k*a) > 0` for every propagating mode — backwards. This wasn't
+//! just a relabeling that washed out elsewhere: with the wrong sign, the
+//! effective damping at the contacts was negative, and `g_diag` (the
+//! `-Im(G_ii)/a` local-density-of-states proxy) could go materially
+//! negative — confirmed empirically before this fix, at exactly the
+//! broadening used inside the self-consistent loop — which is unphysical
+//! for a real density of states. `crate::charge::electron_density` was
+//! shielded from producing a negative *charge* density purely because it
+//! only ever uses squared magnitudes `|G|^2`, but its quantitative values
+//! (resonance heights/widths) were still computed from a non-causal Green's
+//! function. With the corrected sign, `g_diag` is non-negative (see
+//! `tests::g_diag_is_non_negative_at_self_consistent_loop_broadening`), as
+//! required for a properly causal system.
+//!
+//! This bug was inherited unchanged from `quantumsim.m`'s `calc_green()`
+//! (not introduced by this rewrite), and is now fixed here — a deliberate,
+//! documented deviation from a byte-for-byte port, on top of the ones
+//! listed in the top-level README.
 
 use num_complex::Complex64;
 
@@ -113,8 +137,11 @@ pub const DEFAULT_ETA: f64 = 1e-8;
 pub struct GreenFunctionResult {
     /// Energy grid, eV.
     pub energies: Vec<f64>,
-    /// `Im(G_ii(E)) / a` for every site `i`, indexed `[energy][site]`.
-    /// Proportional to the local density of states (matches `G_r_diag`).
+    /// `-Im(G_ii(E)) / a` for every site `i`, indexed `[energy][site]`.
+    /// Proportional to the local density of states (`pi * a` times this is
+    /// the textbook LDOS `-Im(G_ii)/pi`; the original MATLAB `G_r_diag`
+    /// carried neither the minus sign nor the `1/pi`, see the module docs'
+    /// "Contact self-energies" section for why the sign is corrected here).
     pub g_diag: Vec<Vec<f64>>,
     /// `|G_{i,0}(E)|^2` for every site `i`, indexed `[energy][site]`
     /// (matches `G_r_1N(:,:,1)`, the source-injected column).
@@ -164,11 +191,11 @@ pub fn green_function_sweep(device: &Device, energies: &[f64], eta: f64) -> Gree
             .collect();
 
         if e >= psi_0s {
-            let sigma_l = t * (Complex64::i() * ka_s).exp();
+            let sigma_l = t * (-(Complex64::i() * ka_s)).exp();
             diag[0] = Complex64::new(e, eta) - (Complex64::new(c1, 0.0) + sigma_l);
         }
         if e >= psi_0d {
-            let sigma_r = t * (Complex64::i() * ka_d).exp();
+            let sigma_r = t * (-(Complex64::i() * ka_d)).exp();
             diag[n - 1] = Complex64::new(e, eta) - (Complex64::new(c_n, 0.0) + sigma_r);
         }
 
@@ -182,7 +209,7 @@ pub fn green_function_sweep(device: &Device, energies: &[f64], eta: f64) -> Gree
         e_drain[n - 1] = Complex64::new(1.0, 0.0);
         let col_drain = tridiag::solve_complex(&off_diag, &diag, &off_diag, &e_drain);
 
-        g_diag.push(full_diag.iter().map(|g| g.im / a).collect());
+        g_diag.push(full_diag.iter().map(|g| -g.im / a).collect());
         g_col_source.push(col_source.iter().map(|g| g.norm_sqr()).collect());
         g_col_drain.push(col_drain.iter().map(|g| g.norm_sqr()).collect());
     }
@@ -343,38 +370,35 @@ mod tests {
         }
     }
 
-    /// Documents a specific, checked claim from the module docs' "Contact
-    /// self-energy sign convention" section: for a propagating contact mode
-    /// (`k` real, `0 < k*a < pi`), `sigma = t_hop * exp(i*k*a)` has
-    /// `Im(sigma) > 0`. A causal/dissipative retarded self-energy for an
-    /// absorbing lead requires `Im(sigma) <= 0` (that's what makes
-    /// `Gamma = -2*Im(sigma)` a non-negative broadening); this formula has
-    /// the opposite sign, confirmed here so this doesn't silently
-    /// bit-rot into an inaccurate comment.
+    /// Documents the corrected sign claim from the module docs' "Contact
+    /// self-energies" section: for the branch of `ka_s`/`ka_d` this module
+    /// actually computes (`ka in (0, pi)`, the reflected branch), the
+    /// self-energy `sigma = t_hop * exp(-i*ka)` — as constructed in
+    /// [`green_function_sweep`] — has `Im(sigma) <= 0`, as required for a
+    /// causal, absorbing (not amplifying) contact.
     #[test]
-    fn contact_self_energy_has_positive_imaginary_part_for_propagating_modes() {
+    fn contact_self_energy_has_non_positive_imaginary_part_for_propagating_modes() {
         let t = 1.69_f64;
         for ka in [0.2, 0.7_f64, std::f64::consts::FRAC_PI_2, 2.5, 3.0] {
-            let sigma = t * (Complex64::i() * Complex64::new(ka, 0.0)).exp();
+            let sigma = t * (-(Complex64::i() * Complex64::new(ka, 0.0))).exp();
             assert!(
-                sigma.im > 0.0,
-                "expected Im(sigma) > 0 at ka={ka}, got {}",
+                sigma.im <= 0.0,
+                "expected Im(sigma) <= 0 at ka={ka}, got {}",
                 sigma.im
             );
-            assert!((sigma.im - t * ka.sin()).abs() < 1e-12);
+            assert!((sigma.im + t * ka.sin()).abs() < 1e-12);
         }
     }
 
-    /// `g_diag` (the `+Im(G)/a` LDOS proxy) is *not* guaranteed non-negative
-    /// given the sign convention above — unlike `electron_density` (see
-    /// `charge.rs`), which stays non-negative by construction since it only
-    /// ever uses `|G|^2`. This device/energy range is a known example where
-    /// `g_diag` dips clearly negative at the broadening used inside the
-    /// self-consistent loop, recorded here so the behavior described in the
-    /// module docs has a concrete, reproducible witness instead of only a
-    /// prose claim.
+    /// With the corrected self-energy sign, `g_diag` (the `-Im(G_ii)/a`
+    /// LDOS proxy) should be non-negative — the defining property of a
+    /// proper (causal) local density of states, and the concrete symptom
+    /// that was violated before the sign fix. Checked at the same
+    /// device/energy range and broadening (`eta = 0.08`, the value used
+    /// inside the self-consistent loop) that previously exhibited a clearly
+    /// negative dip, as a regression guard.
     #[test]
-    fn g_diag_can_go_negative_at_self_consistent_loop_broadening() {
+    fn g_diag_is_non_negative_at_self_consistent_loop_broadening() {
         let mut device = Device::new(DeviceParams {
             a: 0.5,
             l_ch: 20.0,
@@ -394,9 +418,6 @@ mod tests {
             .iter()
             .flat_map(|row| row.iter().cloned())
             .fold(f64::INFINITY, f64::min);
-        assert!(
-            worst < 0.0,
-            "expected this known case to exhibit a negative g_diag dip, got worst={worst}"
-        );
+        assert!(worst >= -1e-9, "expected non-negative g_diag, got worst={worst}");
     }
 }

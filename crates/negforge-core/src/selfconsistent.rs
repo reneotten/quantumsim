@@ -35,22 +35,22 @@
 //!
 //! ## Validity: mixing, tolerance, and convergence are numerical, not physical
 //!
-//! `mixing` (linear/Picard mixing of the charge-density update) and
-//! `eta` are numerical stabilization knobs, not physical parameters: they
-//! affect *whether and how fast* the iteration converges, not what it
-//! converges to (a true fixed point of Poisson<->NEGF is independent of
-//! both, modulo the sign caveat in `negf.rs`, which affects the *values*
-//! `charge::electron_density` computes at each iteration, not the linear
-//! -algebra fixed-point-seeking logic here). A run that fails to converge
-//! (`NotConverged`) is not evidence the device physics is invalid — it may
-//! just need more `max_iterations`, a smaller `mixing`, or a larger `eta`
-//! (see `negf::DEFAULT_ETA`'s docs for why `eta` in particular matters for
-//! convergence). Conversely, convergence is a necessary but not sufficient
-//! condition for physical correctness: a converged fixed point still
-//! inherits every approximation described in `device.rs`, `negf.rs` and
-//! `charge.rs` (ballistic transport, natural-length electrostatics, the
-//! contact self-energy sign question, no explicit spin-degeneracy factor
-//! in the charge density, etc.).
+//! `mixing` (linear/Picard mixing of the charge-density update) and `eta`
+//! are numerical stabilization knobs, not physical parameters: they affect
+//! *whether and how fast* the iteration converges, not what it converges
+//! to (a true fixed point of Poisson<->NEGF is independent of both). `eta`
+//! in particular still needs to be several times the energy-grid spacing
+//! `d_e` even with a correctly-signed contact self-energy (see
+//! `negf::DEFAULT_ETA`'s docs) — that requirement comes from resolving
+//! sharp resonances smoothly across iterations, not from compensating for
+//! any sign error. A run that fails to converge (`NotConverged`) is not
+//! evidence the device physics is invalid — it may just need more
+//! `max_iterations`, a smaller `mixing`, or a larger `eta`. Conversely,
+//! convergence is a necessary but not sufficient condition for physical
+//! correctness: a converged fixed point still inherits every approximation
+//! described in `device.rs`, `negf.rs` and `charge.rs` (ballistic
+//! transport, natural-length electrostatics, no explicit spin-degeneracy
+//! factor in the charge density, etc.).
 
 use crate::charge;
 use crate::constants::E as ELEMENTARY_CHARGE;

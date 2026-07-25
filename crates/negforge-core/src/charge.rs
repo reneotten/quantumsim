@@ -32,29 +32,30 @@
 //! charge density (m^-1 -> m^-3 assuming unit cross-section, times `-e`)
 //! before assigning it to `rho` — see that module's docs.
 //!
-//! ## Validity: normalization, sign, and open questions
+//! ## Validity: normalization and what's still a simplification
 //!
 //! Every term summed into `n` is `(non-negative broadening) * (Fermi
 //! occupation in (0,1)) * |G|^2`, so `n(x) >= 0` always holds by
-//! construction — this does *not* depend on the contact self-energy sign
-//! question discussed in `negf.rs` (which affects `g_diag`, not the `|G|^2`
-//! columns used here).
+//! construction, independent of any Green's-function sign convention.
 //!
-//! What *is* inherited from that sign question: `gamma_s`/`gamma_d` here
-//! use `+t_hop * sin(k)` together with a `1/pi` prefactor (rather than the
-//! more commonly quoted `Gamma = -2*Im(Sigma)` broadening with a `1/(2*pi)`
-//! prefactor); the two conventions happen to give the same magnitude
-//! (`t_hop*sin(k)/pi == (2*t_hop*sin(k))/(2*pi)`), so this reproduces the
-//! standard formula's *magnitude* even though the sign story behind
-//! `gamma_s`/`gamma_d` individually is the same non-causal one described in
-//! `negf.rs`. Also note there is no explicit spin-degeneracy factor of two
-//! here (unlike `calc_current`'s explicit `2*e/h`) — carried over unchanged
-//! from the original `calc_n`, which never had this checked against a
-//! reference since it was never fed back into anything before this rewrite.
-//! Treat absolute magnitudes of the self-consistent charge density as
-//! illustrative rather than quantitatively validated; the qualitative
-//! behavior (current increasing with gate/drain bias, convergence to a
-//! stable fixed point) is covered by the integration tests.
+//! `gamma_s`/`gamma_d` here are `t_hop * sin(k)`, i.e. *half* of the
+//! standard contact broadening `Gamma = -2*Im(Sigma) = 2*t_hop*sin(k)`
+//! (see `negf.rs` for the self-energy `Sigma` this comes from); combined
+//! with this module's `1/pi` prefactor (rather than the more commonly
+//! quoted `Gamma * .../(2*pi)`), the two halvings cancel and the result
+//! matches the textbook formula
+//! `n(x) = (1/2*pi) * integral[Gamma_S(E) f_S(E) |G_{x,1}|^2 +
+//! Gamma_D(E) f_D(E) |G_{x,N}|^2] dE` exactly. One thing that is *not* a
+//! mere normalization choice: there is no explicit spin-degeneracy factor
+//! of two here (unlike `calc_current`'s explicit `2*e/h`), carried over
+//! unchanged from the original `calc_n`, which was never checked against a
+//! reference since it was never fed back into anything before this
+//! rewrite. If your convention for `f_S`/`f_D`/the density of states
+//! already bakes in spin degeneracy this is correct as-is; if not, this
+//! systematically undercounts by 2x relative to a genuinely
+//! spin-summed electron density. Not fixed here since which convention is
+//! "right" depends on how the density is meant to be used downstream and
+//! wasn't specified by the original coursework code either.
 
 use crate::constants::{E, K_B};
 use crate::negf::GreenFunctionResult;
