@@ -100,9 +100,9 @@ potentials in eV, temperature in Kelvin.
 
 ## Deviations from the original MATLAB code
 
-The user requested a faithful port plus closing the missing
-self-consistency loop, not a from-scratch physics redesign. Everything
-below is a deliberate, documented decision, not an accident:
+This is a faithful port plus closing the missing self-consistency loop,
+not a from-scratch physics redesign. Everything below is a deliberate,
+documented decision, not an accident:
 
 1. **Self-consistent Poisson&harr;NEGF loop** (`selfconsistent.rs`). The
    original computed the electrostatic potential once with `rho = 0` and,
