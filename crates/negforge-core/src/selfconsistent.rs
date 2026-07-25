@@ -13,31 +13,32 @@
 //!
 //! ## Charge-density units
 //!
-//! `calc_potential`'s RHS divides `rho + N_dot` by `EPS_0 * k_si`, with
-//! `EPS_0` in SI units (F/m). For that division to land back in the same
-//! eV/nm^2 ballpark as the other RHS term (`(Psi_g + Psi_bi) / lambda^2`),
-//! `rho` has to actually be a charge density in C/m^3 — the original code
-//! never exercised this (`rho` was always zero) so it was never validated.
-//! This loop therefore converts the NEGF electron density to a proper
-//! volume charge density before assigning it to `rho`:
+//! [`charge::electron_density`] returns a *linear* density in nm^-1, while
+//! `Device::calc_potential` needs a volume charge density. The conversion
+//! needs the channel cross-section and a unit rescaling, both of which are
+//! easy to get silently wrong:
 //!
-//! 1. [`charge::electron_density`] returns a linear density in nm^-1
-//!    (natural units for this model's nm-scaled grid).
-//! 2. Convert to m^-1 (`* 1e9`) and treat the 1D chain as having an
-//!    implicit unit (1 m^2) cross-section, so the linear density doubles as
-//!    a volume density.
-//! 3. Multiply by `-e` (electrons are negatively charged) to get `rho` in
-//!    C/m^3: `rho(x) = -e * n_electron(x) * 1e9`.
+//! 1. Divide by the cross-section [`Device::cross_section_nm2`] to get a
+//!    volume density in nm^-3, then multiply by 1e27 for m^-3.
+//! 2. Multiply by `-e` (electrons are negatively charged) for C/m^3.
+//! 3. Multiply by [`device::RHO_SI_TO_MODEL`] (1e-18), because the
+//!    electrostatic solve's Laplacian is built in nm^-2 — see the
+//!    `device` module docs.
 //!
-//! `N_dot` (fixed dopant charge) is left as-is (default zero); if it is
-//! used with a nonzero value it should be supplied in the same C/m^3 units
-//! for consistency.
+//! Steps 1-3 collapse to `rho(x) = -e * n(x) * 1e9 / cross_section_nm2`.
+//!
+//! The cross-section matters: it sets how strongly the charge talks back to
+//! the potential. For the default geometry the charge term reaches roughly
+//! 10% of the gate/built-in term, so self-consistency is a real but
+//! perturbative correction. Dropping the cross-section entirely (equivalent
+//! to assuming 1 nm^2) makes it the *dominant* term, which is how the
+//! original scaling behaved.
 
 use crate::charge;
 use crate::constants::E as ELEMENTARY_CHARGE;
-use crate::device::Device;
+use crate::device::{self, Device};
 use crate::error::{NegForgeError, Result};
-use crate::negf::{self, GreenFunctionAlgorithm, GreenFunctionResult};
+use crate::negf::{self, GreenFunctionAlgorithm, GreenFunctionResult, GreenOutputs};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SelfConsistentOptions {
@@ -53,20 +54,33 @@ pub struct SelfConsistentOptions {
     /// (matches the `0.7 * E_max` hardcoded in the original `calc_green`).
     pub green_energy_fraction: f64,
     /// Imaginary broadening used for the NEGF evaluations inside the loop.
-    /// Should be several times the energy-grid step (`device.params.d_e`)
-    /// so that resonances are resolved smoothly across iterations instead
-    /// of spiking whenever a grid point happens to land near a pole — see
-    /// the module docs and [`crate::negf::DEFAULT_ETA`]. Increase this if
-    /// the loop fails to converge; decrease for sharper resonance
-    /// resolution (at the cost of a noisier, potentially non-converging
-    /// iteration).
-    pub eta: f64,
+    /// `None` (the default) uses [`ETA_GRID_FACTOR`] times the device's
+    /// energy-grid step `d_e`.
+    ///
+    /// This is a numerical-integration parameter, not physics: it broadens
+    /// every spectral feature by `2*eta`. It only has to be large enough that
+    /// a resonance is resolved over several energy-grid points — otherwise
+    /// the charge estimate jumps around with grid alignment between
+    /// iterations and the fixed point never settles — so it should scale with
+    /// `d_e`, not be a fixed number. Increase it if the loop fails to
+    /// converge; decrease for sharper resonances.
+    ///
+    /// Note this is ~1-2 orders of magnitude below the value the loop needed
+    /// before the contact self-energy sign was corrected: with the wrong
+    /// sign, `eta` partially cancelled the contact broadening, and only a
+    /// large `eta` kept the iteration stable (see the `negf` module docs).
+    pub eta: Option<f64>,
     /// Which NEGF algorithm to use for the sweep inside each iteration.
     /// Defaults to `Recursive` (O(N)) — see `negf.rs` module docs for the
     /// dense-vs-recursive tradeoff. `Dense` works too, just far slower per
     /// iteration; mainly useful for cross-validating a suspicious result.
     pub algorithm: GreenFunctionAlgorithm,
 }
+
+/// Default [`SelfConsistentOptions::eta`], as a multiple of the device's
+/// energy-grid step `d_e`. Empirically the smallest factor that converges
+/// robustly across device scales; 1x `d_e` does not converge at all.
+pub const ETA_GRID_FACTOR: f64 = 5.0;
 
 impl Default for SelfConsistentOptions {
     fn default() -> Self {
@@ -75,7 +89,7 @@ impl Default for SelfConsistentOptions {
             tolerance: 1e-6,
             mixing: 0.3,
             green_energy_fraction: 0.7,
-            eta: 0.08,
+            eta: None,
             algorithm: GreenFunctionAlgorithm::Recursive,
         }
     }
@@ -84,7 +98,12 @@ impl Default for SelfConsistentOptions {
 pub struct SelfConsistentResult {
     pub iterations: usize,
     pub residual: f64,
+    /// The converged sweep. Computed with
+    /// [`GreenOutputs::BoundaryColumns`], so its `ldos` is empty — re-run
+    /// [`negf::green_function_sweep`] on the converged device if you want
+    /// the local density of states.
     pub green: GreenFunctionResult,
+    /// Converged electron density, nm^-1.
     pub electron_density: Vec<f64>,
 }
 
@@ -112,25 +131,41 @@ pub fn solve_self_consistent(
 
     device.calc_potential();
 
+    let eta = opts.eta.unwrap_or(ETA_GRID_FACTOR * device.params.d_e);
+    if eta <= 0.0 || !eta.is_finite() {
+        return Err(NegForgeError::InvalidParameter(format!(
+            "eta must be positive, got {eta}"
+        )));
+    }
+
     let mut last_residual = f64::INFINITY;
     for iteration in 1..=opts.max_iterations {
         let energies = negf_energy_grid(device, opts.green_energy_fraction);
-        let green = negf::green_function_sweep(device, &energies, opts.eta, opts.algorithm);
+        // The charge density only reads the boundary columns, so the LDOS
+        // diagonal (~30% of the recursive sweep, and the largest output
+        // array) is never computed here.
+        let green = negf::green_function_sweep(
+            device,
+            &energies,
+            eta,
+            opts.algorithm,
+            GreenOutputs::BoundaryColumns,
+        );
         let n_electron = charge::electron_density(
             &green,
-            device.t_hop,
             device.params.a,
-            device.psi_f[0],
-            device.psi_f[device.n - 1],
             device.params.e_fs,
             device.e_fd,
             device.params.t,
             device.params.d_e,
         );
 
+        // nm^-1 -> C/m^3 -> model units; see the module docs.
+        let rho_scale =
+            -ELEMENTARY_CHARGE * 1e27 * device::RHO_SI_TO_MODEL / device.cross_section_nm2;
         let mixing = opts.mixing;
         for (rho_i, &n_i) in device.rho.iter_mut().zip(n_electron.iter()) {
-            let target_rho = -ELEMENTARY_CHARGE * n_i * 1e9;
+            let target_rho = rho_scale * n_i;
             *rho_i += mixing * (target_rho - *rho_i);
         }
 
@@ -182,7 +217,7 @@ mod tests {
             tolerance: 1e-5,
             mixing: 0.3,
             green_energy_fraction: 0.7,
-            eta: 0.04,
+            eta: Some(0.04),
             algorithm: GreenFunctionAlgorithm::Recursive,
         };
         let result = solve_self_consistent(&mut device, &opts).expect("should converge");
@@ -209,7 +244,7 @@ mod tests {
             tolerance: 1e-5,
             mixing: 0.3,
             green_energy_fraction: 0.7,
-            eta: 0.04,
+            eta: Some(0.04),
             algorithm: GreenFunctionAlgorithm::Recursive,
         };
 

@@ -16,7 +16,7 @@ fn report(name: &str, mut params: DeviceParams, l_ch: f64) {
     params.v_ds = 0.3;
     let dev = Device::new(params);
     let points = sweep_v_g(&dev, 0.0, 0.4, 0.02, None).unwrap();
-    let s = subthreshold_swing(&points, 0.0, 0.4);
+    let s = subthreshold_swing(&points, 0.0, 0.4).expect("swing fit should be well posed");
     println!(
         "{name:<11} lambda={:>6.3} nm   S={:>6.1} mV/decade",
         dev.lambda,

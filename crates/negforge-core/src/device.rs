@@ -40,6 +40,17 @@
 //! quantization. See the top-level README's "Extending to a real 3D
 //! solver" section for what a genuine cross-section-resolved model would
 //! require.
+//!
+//! ## Charge-density units in the electrostatic solve
+//!
+//! Because the discrete Laplacian is built with `a` in nm, every term of
+//! `calc_potential`'s right-hand side is an energy per nm^2 (eV/nm^2). The
+//! charge term is `rho / (EPS_0 * k_si)`, and `EPS_0` is in SI units (F/m),
+//! so a charge density in C/m^3 would give V/m^2 there — off by 1e18 from the
+//! rest of the equation. [`Device::rho`] and [`DeviceParams::n_dot`] are
+//! therefore expressed in *model units*: an SI volume charge density scaled
+//! by [`RHO_SI_TO_MODEL`]. [`crate::selfconsistent`] does that conversion for
+//! the NEGF charge; anyone setting `rho`/`n_dot` by hand must do the same.
 
 use crate::constants::{E, EPS_0, H_BAR, K_B, M_E};
 use crate::tridiag;
@@ -74,6 +85,14 @@ impl GateGeometry {
         }
     }
 }
+
+/// Multiply an SI volume charge density (C/m^3) by this to get the model
+/// units [`Device::rho`] and [`DeviceParams::n_dot`] use.
+///
+/// The factor is `(1 nm / 1 m)^2 = 1e-18`, the same conversion that takes the
+/// electrostatic solve's `V/m^2` charge term into the `eV/nm^2` its Laplacian
+/// works in. See the module docs.
+pub const RHO_SI_TO_MODEL: f64 = 1e-18;
 
 /// Configuration for a [`Device`]. Field defaults match the original
 /// `quantumsim.m` `properties` block.
@@ -110,9 +129,17 @@ pub struct DeviceParams {
     /// Source/drain contact region length, nm. Only used verbatim when
     /// `auto_size_contacts` is `false`.
     pub l_ds: f64,
-    /// Fixed dopant charge term added to the mobile charge density in the
-    /// electrostatic solve.
+    /// Fixed dopant charge density added to the mobile charge density in the
+    /// electrostatic solve, in model units (SI C/m^3 times
+    /// [`RHO_SI_TO_MODEL`] — see the module docs).
     pub n_dot: f64,
+    /// Cross-sectional area of the conducting channel, nm^2. The transport
+    /// model is one-dimensional, so it yields a *linear* electron density;
+    /// turning that into the volume charge density the electrostatic solve
+    /// needs requires an area, and leaving it implicit is how a model quietly
+    /// acquires an arbitrary charge-density scale. `None` (the default) uses
+    /// `d_ch^2`, i.e. a square channel of the model's own body thickness.
+    pub cross_section_nm2: Option<f64>,
     /// Fermi-function tolerance used to bound the ballistic energy window.
     pub epsilon: f64,
     /// Source Fermi level, eV.
@@ -142,6 +169,7 @@ impl Default for DeviceParams {
             auto_size_contacts: true,
             l_ds: 40.0,
             n_dot: 0.0,
+            cross_section_nm2: None,
             epsilon: 10e-15,
             e_fs: 0.05,
             t: 300.0,
@@ -205,6 +233,9 @@ pub struct Device {
 
     /// Natural (screening) length, nm.
     pub lambda: f64,
+    /// Resolved channel cross-section, nm^2 (see
+    /// [`DeviceParams::cross_section_nm2`]).
+    pub cross_section_nm2: f64,
     /// Number of grid points along the channel.
     pub n: usize,
     /// Last grid index (0-based) belonging to the source region.
@@ -216,8 +247,9 @@ pub struct Device {
     pub psi_g: Vec<f64>,
     /// Built-in potential energy profile, eV.
     pub psi_bi: Vec<f64>,
-    /// Mobile charge density term entering the electrostatic solve. Zero
-    /// until a self-consistent (NEGF-fed) solve updates it.
+    /// Mobile charge density entering the electrostatic solve, in model units
+    /// (SI C/m^3 times [`RHO_SI_TO_MODEL`] — see the module docs). Zero until
+    /// a self-consistent (NEGF-fed) solve updates it.
     pub rho: Vec<f64>,
     /// Solved electrostatic potential energy profile, eV.
     pub psi_f: Vec<f64>,
@@ -266,6 +298,10 @@ impl Device {
             params.l_ds = (lambda.floor()) * 15.0;
         }
 
+        // Checked only now: `l_ds` may have just been derived from `lambda`,
+        // so the grid size isn't knowable from the caller's parameters alone.
+        Self::validate_grid(&params)?;
+
         let (n, n_left, n_right) = Self::compute_grid(&params);
         let e_fd = -params.v_ds + 0.05;
         let e_max = params.e_fs - K_B * params.t * params.epsilon.ln() / E;
@@ -274,6 +310,9 @@ impl Device {
         let mut device = Self {
             params,
             lambda,
+            cross_section_nm2: params
+                .cross_section_nm2
+                .unwrap_or(params.d_ch * params.d_ch),
             n,
             n_left,
             n_right,
@@ -287,6 +326,12 @@ impl Device {
             t_hop,
         };
         device.init_vectors();
+        // Leave the device in a self-consistent-with-its-parameters state:
+        // `psi_f`/`psi_0` always reflect the current bias, so `calc_current`
+        // and the NEGF entry points can never read a potential that belongs
+        // to a different device configuration. Same contract as the
+        // `set_*` bias setters below.
+        device.calc_potential();
         Ok(device)
     }
 
@@ -314,6 +359,28 @@ impl Device {
                 params.l_ds
             )));
         }
+        if let Some(area) = params.cross_section_nm2 {
+            if !(area.is_finite() && area > 0.0) {
+                return Err(crate::error::NegForgeError::InvalidParameter(format!(
+                    "cross_section_nm2 must be finite and positive, got {area}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check that the device is long enough to discretize, given the grid
+    /// spacing. Separate from [`Self::validate_params`] because it has to run
+    /// after `l_ds` may have been auto-sized from `lambda`.
+    fn validate_grid(params: &DeviceParams) -> crate::error::Result<()> {
+        let l_g = 2.0 * params.l_ds + params.l_ch;
+        if !(l_g.is_finite() && l_g >= params.a) {
+            return Err(crate::error::NegForgeError::InvalidParameter(format!(
+                "grid spacing a = {} nm is too coarse for a device of total length {} nm: \
+                 the discretization needs at least two grid points",
+                params.a, l_g
+            )));
+        }
         Ok(())
     }
 
@@ -321,8 +388,12 @@ impl Device {
         (params.k_si / params.k_ox * params.d_ch * params.d_ox / params.geo).sqrt()
     }
 
+    /// Grid sizing. Assumes [`Self::validate_params`] and
+    /// [`Self::validate_grid`] have already run, so `a > 0` and the device
+    /// spans at least two points.
     fn compute_grid(params: &DeviceParams) -> (usize, usize, usize) {
         let l_g = 2.0 * params.l_ds + params.l_ch;
+        debug_assert!(params.a > 0.0 && l_g.is_finite() && l_g >= params.a);
         let n = (l_g / params.a).floor() as usize + 1;
         let n_left = (params.l_ds / params.a).floor() as usize;
         let n_right = n - n_left;
@@ -385,12 +456,29 @@ impl Device {
         self.psi_0 = self.psi_f.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     }
 
-    /// Ballistic Landauer current for the current potential profile.
-    /// Mirrors `calc_current()`. Units match the original scaling
-    /// convention (see `legacy_matlab/README.md`).
+    /// Ballistic Landauer current for the current potential profile, in
+    /// **amperes** per conducting subband:
+    ///
+    /// ```text
+    /// I = (2e/h) * integral_{Psi_0}^{E_max} [f_s(E) - f_d(E)] dE
+    /// ```
+    ///
+    /// The factor 2 is spin degeneracy; the lower limit `Psi_0 = max(Psi_f)`
+    /// is the top of the barrier. This is the classic ballistic-MOSFET model:
+    /// transmission is assumed to be exactly 1 above the barrier and 0 below
+    /// it, so there is no tunneling and no quantum reflection. For the actual
+    /// transmission of the potential profile, use
+    /// [`crate::negf::negf_current`], which evaluates the Landauer integral
+    /// with the NEGF `T(E)` instead.
+    ///
+    /// The original MATLAB multiplied this by an unexplained `1e-3`, which is
+    /// dropped here: the formula above is the physical current, and the extra
+    /// factor only made absolute values wrong. Ratios and the subthreshold
+    /// swing (a log-slope) are unaffected by the change.
     pub fn calc_current(&self) -> f64 {
-        let f_s = |e: f64| 1.0 / (((e - self.params.e_fs) * E / (K_B * self.params.t)).exp() + 1.0);
-        let f_d = |e: f64| 1.0 / (((e - self.e_fd) * E / (K_B * self.params.t)).exp() + 1.0);
+        let thermal = K_B * self.params.t / E;
+        let f_s = |e: f64| 1.0 / (((e - self.params.e_fs) / thermal).exp() + 1.0);
+        let f_d = |e: f64| 1.0 / (((e - self.e_fd) / thermal).exp() + 1.0);
 
         let n_steps = ((self.e_max - self.psi_0) / self.params.d_e)
             .floor()
@@ -400,27 +488,55 @@ impl Device {
             let energy = self.psi_0 + k as f64 * self.params.d_e;
             sum += f_s(energy) - f_d(energy);
         }
-        2.0 * E / crate::constants::H * sum * self.params.d_e * E * 1e-3
+        // `sum * d_e` is in eV; the trailing `E` converts it to joules.
+        2.0 * E / crate::constants::H * sum * self.params.d_e * E
     }
 
+    /// Set the drain-source bias.
+    ///
+    /// Like the other setters, this rebuilds the drive terms *and* re-solves
+    /// the electrostatic potential, so `psi_f`/`psi_0` are never left over
+    /// from the previous bias point — `calc_current` and the NEGF entry
+    /// points are safe to call immediately afterwards. Note that this resets
+    /// `rho` to zero (see `init_vectors`), so the re-solve is the decoupled
+    /// one; a self-consistent result has to be re-established by calling
+    /// [`crate::selfconsistent::solve_self_consistent`] again.
     pub fn set_v_ds(&mut self, v: f64) {
         self.params.v_ds = v;
         self.e_fd = -v + 0.05;
         self.init_vectors();
+        self.calc_potential();
     }
 
+    /// Set the gate bias. Same re-solve contract as [`Device::set_v_ds`].
     pub fn set_v_g(&mut self, v: f64) {
         self.params.v_g = v;
         self.init_vectors();
+        self.calc_potential();
     }
 
-    pub fn set_l_ch(&mut self, l: f64) {
-        self.params.l_ch = l;
+    /// Set the channel length, re-deriving the grid. Same re-solve contract
+    /// as [`Device::set_v_ds`].
+    ///
+    /// Fallible, unlike the bias setters: a channel length changes the grid,
+    /// so it can be rejected the same way [`Device::try_new`] rejects one.
+    pub fn set_l_ch(&mut self, l: f64) -> crate::error::Result<()> {
+        // Same validation as construction: a channel length that can't be
+        // discretized is a caller error, not a panic. Checked on a copy so a
+        // rejected value leaves the device untouched.
+        let mut candidate = self.params;
+        candidate.l_ch = l;
+        Self::validate_params(&candidate)?;
+        Self::validate_grid(&candidate)?;
+
+        self.params = candidate;
         let (n, n_left, n_right) = Self::compute_grid(&self.params);
         self.n = n;
         self.n_left = n_left;
         self.n_right = n_right;
         self.init_vectors();
+        self.calc_potential();
+        Ok(())
     }
 }
 
@@ -463,13 +579,34 @@ mod tests {
     }
 
     #[test]
+    fn bias_setters_leave_the_potential_up_to_date() {
+        // A bias setter must not leave `psi_f`/`psi_0` describing the
+        // previous bias point: calling `calc_current()` straight after a
+        // setter has to give the same answer as an explicit re-solve.
+        let mut dev = Device::new(DeviceParams::default());
+
+        dev.set_v_ds(0.3);
+        let psi_f_after_setter = dev.psi_f.clone();
+        let psi_0_after_setter = dev.psi_0;
+        let current_after_setter = dev.calc_current();
+
+        dev.calc_potential();
+        assert_eq!(dev.psi_f, psi_f_after_setter);
+        assert_eq!(dev.psi_0, psi_0_after_setter);
+        assert_eq!(dev.calc_current(), current_after_setter);
+
+        // Same for a setter that changes the grid size.
+        dev.set_l_ch(20.0).unwrap();
+        assert_eq!(dev.psi_f.len(), dev.n);
+        assert!(dev.psi_f.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
     fn increasing_v_ds_increases_current() {
         let mut dev = Device::new(DeviceParams::default());
-        dev.calc_potential();
         let i0 = dev.calc_current();
 
         dev.set_v_ds(0.3);
-        dev.calc_potential();
         let i1 = dev.calc_current();
 
         assert!(
@@ -482,11 +619,9 @@ mod tests {
     fn increasing_v_g_increases_current_ballistic_mosfet() {
         let mut dev = Device::new(DeviceParams::default());
         dev.set_v_ds(0.3);
-        dev.calc_potential();
         let i0 = dev.calc_current();
 
         dev.set_v_g(0.3);
-        dev.calc_potential();
         let i1 = dev.calc_current();
 
         assert!(
@@ -511,5 +646,58 @@ mod tests {
             d_ch: -1.0,
             ..Default::default()
         });
+    }
+
+    #[test]
+    fn rejects_a_grid_too_coarse_to_discretize() {
+        // `a` on its own is positive and finite, so this only shows up once
+        // the device length is known — and it must be an error rather than a
+        // panic, since it is reachable straight from user parameters.
+        let err = Device::try_new(DeviceParams {
+            a: 500.0,
+            l_ch: 10.0,
+            l_ds: 10.0,
+            auto_size_contacts: false,
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("too coarse"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_physical_cross_section() {
+        for area in [0.0, -25.0, f64::NAN] {
+            let err = Device::try_new(DeviceParams {
+                cross_section_nm2: Some(area),
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("cross_section_nm2"),
+                "unexpected error for area {area}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_l_ch_rejects_a_bad_length_without_disturbing_the_device() {
+        let mut dev = Device::new(DeviceParams::default());
+        let n_before = dev.n;
+        let psi_f_before = dev.psi_f.clone();
+
+        assert!(dev.set_l_ch(-40.0).is_err());
+        assert!(dev.set_l_ch(f64::NAN).is_err());
+
+        // A rejected length must leave the device exactly as it was, not
+        // half-updated.
+        assert_eq!(dev.n, n_before);
+        assert_eq!(dev.psi_f, psi_f_before);
+        assert_eq!(dev.params.l_ch, DeviceParams::default().l_ch);
+
+        assert!(dev.set_l_ch(20.0).is_ok());
+        assert_ne!(dev.n, n_before);
     }
 }

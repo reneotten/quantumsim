@@ -6,13 +6,15 @@
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
+use negforge_core::negf::GreenOutputs;
 use negforge_core::{Device, DeviceParams, GreenFunctionAlgorithm, SelfConsistentOptions};
 
 /// Map a [`negforge_core::NegForgeError`] to the appropriate Python
-/// exception type: `InvalidParameter` (bad user input, e.g. a
-/// non-physical device geometry) becomes a `ValueError`, matching Python
-/// convention; everything else (currently just `NotConverged`, a runtime
-/// condition rather than a caller mistake) becomes a `RuntimeError`.
+/// exception type: `InvalidParameter` (bad user input — a non-physical
+/// device geometry, an invalid sweep range, a nonsensical mixing factor)
+/// becomes a `ValueError`, matching Python convention and the `algorithm`
+/// validation below; a failure of the numerics itself (currently just
+/// `NotConverged`) stays a `RuntimeError`.
 fn to_py_err(e: negforge_core::NegForgeError) -> PyErr {
     match e {
         negforge_core::NegForgeError::InvalidParameter(_) => PyValueError::new_err(e.to_string()),
@@ -23,6 +25,13 @@ fn to_py_err(e: negforge_core::NegForgeError) -> PyErr {
 /// Parse the Python-facing `algorithm` string ("recursive" or "dense") into
 /// a [`GreenFunctionAlgorithm`]. See `negforge_core::negf` module docs for
 /// the tradeoff between the two.
+///
+/// The sweep entry points validate `algorithm` eagerly, even when
+/// `self_consistent=false` means no Green's function is ever evaluated:
+/// silently accepting `algorithm="Dense"` or `"recurisve"` there would hide
+/// the typo until the caller flips `self_consistent` on and wonders why
+/// nothing got faster. Rejecting an unknown name is the same argument-
+/// validation error either way.
 fn parse_algorithm(algorithm: &str) -> PyResult<GreenFunctionAlgorithm> {
     match algorithm {
         "recursive" => Ok(GreenFunctionAlgorithm::Recursive),
@@ -45,7 +54,8 @@ impl PyDevice {
     #[pyo3(signature = (
         a=0.5, e_f=0.15, e_g=1.0, v_ds=0.0, v_g=0.0, d_ox=5.0, d_ch=5.0,
         k_si=11.2, k_ox=3.9, geo=1.0, l_ch=40.0, auto_size_contacts=true,
-        l_ds=40.0, n_dot=0.0, epsilon=10e-15, e_fs=0.05, t=300.0, d_e=0.001
+        l_ds=40.0, n_dot=0.0, cross_section_nm2=None, epsilon=10e-15,
+        e_fs=0.05, t=300.0, d_e=0.001
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -63,6 +73,7 @@ impl PyDevice {
         auto_size_contacts: bool,
         l_ds: f64,
         n_dot: f64,
+        cross_section_nm2: Option<f64>,
         epsilon: f64,
         e_fs: f64,
         t: f64,
@@ -83,6 +94,7 @@ impl PyDevice {
             auto_size_contacts,
             l_ds,
             n_dot,
+            cross_section_nm2,
             epsilon,
             e_fs,
             t,
@@ -102,6 +114,34 @@ impl PyDevice {
         self.inner.calc_current()
     }
 
+    /// Landauer current from the NEGF transmission (includes tunneling and
+    /// quantum reflection), in amperes.
+    #[pyo3(signature = (eta=negforge_core::negf::DEFAULT_ETA, algorithm="recursive"))]
+    fn calc_current_negf(&self, eta: f64, algorithm: &str) -> PyResult<f64> {
+        Ok(negforge_core::negf::negf_current(
+            &self.inner,
+            eta,
+            parse_algorithm(algorithm)?,
+        ))
+    }
+
+    /// Landauer-Caroli transmission `T(E)` on the NEGF energy grid, as
+    /// `(energies, transmission)`.
+    #[pyo3(signature = (eta=negforge_core::negf::DEFAULT_ETA, algorithm="recursive"))]
+    fn transmission(&self, eta: f64, algorithm: &str) -> PyResult<(Vec<f64>, Vec<f64>)> {
+        let algorithm = parse_algorithm(algorithm)?;
+        let energies = self.negf_energy_grid();
+        let green = negforge_core::negf::green_function_sweep(
+            &self.inner,
+            &energies,
+            eta,
+            algorithm,
+            GreenOutputs::BoundaryColumns,
+        );
+        let transmission = (0..energies.len()).map(|k| green.transmission(k)).collect();
+        Ok((energies, transmission))
+    }
+
     fn set_v_ds(&mut self, v: f64) {
         self.inner.set_v_ds(v);
     }
@@ -110,17 +150,17 @@ impl PyDevice {
         self.inner.set_v_g(v);
     }
 
-    fn set_l_ch(&mut self, l: f64) {
-        self.inner.set_l_ch(l);
+    fn set_l_ch(&mut self, l: f64) -> PyResult<()> {
+        self.inner.set_l_ch(l).map_err(to_py_err)
     }
 
-    #[pyo3(signature = (max_iterations=50, tolerance=1e-6, mixing=0.3, eta=0.08, algorithm="recursive"))]
+    #[pyo3(signature = (max_iterations=50, tolerance=1e-6, mixing=0.3, eta=None, algorithm="recursive"))]
     fn solve_self_consistent(
         &mut self,
         max_iterations: usize,
         tolerance: f64,
         mixing: f64,
-        eta: f64,
+        eta: Option<f64>,
         algorithm: &str,
     ) -> PyResult<(usize, f64)> {
         let opts = SelfConsistentOptions {
@@ -180,7 +220,7 @@ impl PyDevice {
         step: f64,
         self_consistent: bool,
         algorithm: &str,
-    ) -> PyResult<(Vec<f64>, Vec<f64>)> {
+    ) -> PyResult<(Vec<f64>, Vec<f64>, Vec<bool>)> {
         let opts = SelfConsistentOptions {
             algorithm: parse_algorithm(algorithm)?,
             ..Default::default()
@@ -191,6 +231,7 @@ impl PyDevice {
         Ok((
             points.iter().map(|p| p.voltage).collect(),
             points.iter().map(|p| p.current).collect(),
+            points.iter().map(|p| p.converged).collect(),
         ))
     }
 
@@ -205,7 +246,7 @@ impl PyDevice {
         step: f64,
         self_consistent: bool,
         algorithm: &str,
-    ) -> PyResult<(Vec<f64>, Vec<f64>)> {
+    ) -> PyResult<(Vec<f64>, Vec<f64>, Vec<bool>)> {
         let opts = SelfConsistentOptions {
             algorithm: parse_algorithm(algorithm)?,
             ..Default::default()
@@ -216,19 +257,37 @@ impl PyDevice {
         Ok((
             points.iter().map(|p| p.voltage).collect(),
             points.iter().map(|p| p.current).collect(),
+            points.iter().map(|p| p.converged).collect(),
         ))
     }
 
     /// Run the NEGF sweep at the device's current potential and return
-    /// `(energies, ldos)` where `ldos[k]` is the local density of states
-    /// row (one value per grid site) at `energies[k]`. Energy points run
-    /// in parallel across CPU cores. `algorithm` is `"recursive"` (default,
+    /// `(energies, ldos_flat)`, where `ldos_flat` is a row-major
+    /// `len(energies) x n` buffer of the local density of states in
+    /// states/(eV nm) — the Python wrapper reshapes it. Energy points run in
+    /// parallel across CPU cores. `algorithm` is `"recursive"` (default,
     /// O(N) per energy point) or `"dense"` (O(N^3), matching the original
     /// MATLAB `inv()` — see `negforge_core::negf` module docs for why both
     /// exist).
-    #[pyo3(signature = (algorithm="recursive"))]
-    fn local_density_of_states(&self, algorithm: &str) -> PyResult<(Vec<f64>, Vec<Vec<f64>>)> {
+    #[pyo3(signature = (algorithm="recursive", eta=negforge_core::negf::DEFAULT_ETA))]
+    fn local_density_of_states(&self, algorithm: &str, eta: f64) -> PyResult<(Vec<f64>, Vec<f64>)> {
         let algorithm = parse_algorithm(algorithm)?;
+        let energies = self.negf_energy_grid();
+        let result = negforge_core::negf::green_function_sweep(
+            &self.inner,
+            &energies,
+            eta,
+            algorithm,
+            GreenOutputs::Full,
+        );
+        Ok((result.energies, result.ldos))
+    }
+}
+
+impl PyDevice {
+    /// The energy grid the original `calc_green` used: from the bottom of the
+    /// potential profile up to a fraction of the ballistic window.
+    fn negf_energy_grid(&self) -> Vec<f64> {
         let e_min = self
             .inner
             .psi_f
@@ -238,14 +297,7 @@ impl PyDevice {
         let e_max = 0.7 * self.inner.e_max;
         let d_e = self.inner.params.d_e;
         let steps = ((e_max - e_min) / d_e).floor().max(0.0) as usize;
-        let energies: Vec<f64> = (0..=steps).map(|k| e_min + k as f64 * d_e).collect();
-        let result = negforge_core::negf::green_function_sweep(
-            &self.inner,
-            &energies,
-            negforge_core::negf::DEFAULT_ETA,
-            algorithm,
-        );
-        Ok((result.energies, result.g_diag))
+        (0..=steps).map(|k| e_min + k as f64 * d_e).collect()
     }
 }
 

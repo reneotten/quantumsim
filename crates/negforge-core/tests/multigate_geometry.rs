@@ -88,10 +88,9 @@ fn all_three_architectures_converge_self_consistently() {
             d_e: 0.01,
             ..params
         });
-        let opts = SelfConsistentOptions {
-            eta: 0.05,
-            ..Default::default()
-        };
+        // `eta` now defaults to 5 * d_e, which for this device's d_e = 0.01
+        // is the 0.05 this test used to pass explicitly.
+        let opts = SelfConsistentOptions::default();
         let result = solve_self_consistent(&mut dev, &opts)
             .unwrap_or_else(|e| panic!("geo={} should converge: {e}", dev.params.geo));
         assert!(result.residual < opts.tolerance);
@@ -114,7 +113,7 @@ fn more_gates_gives_better_subthreshold_swing_at_short_channel_length() {
             ..params
         });
         let points = sweep_v_g(&dev, 0.0, 0.4, 0.02, None).unwrap();
-        subthreshold_swing(&points, 0.0, 0.4)
+        subthreshold_swing(&points, 0.0, 0.4).expect("swing fit should be well posed")
     };
 
     let s_planar = swing_for(DeviceParams::planar());
