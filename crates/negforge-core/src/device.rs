@@ -298,6 +298,10 @@ impl Device {
             params.l_ds = (lambda.floor()) * 15.0;
         }
 
+        // Checked only now: `l_ds` may have just been derived from `lambda`,
+        // so the grid size isn't knowable from the caller's parameters alone.
+        Self::validate_grid(&params)?;
+
         let (n, n_left, n_right) = Self::compute_grid(&params);
         let e_fd = -params.v_ds + 0.05;
         let e_max = params.e_fs - K_B * params.t * params.epsilon.ln() / E;
@@ -355,6 +359,28 @@ impl Device {
                 params.l_ds
             )));
         }
+        if let Some(area) = params.cross_section_nm2 {
+            if !(area.is_finite() && area > 0.0) {
+                return Err(crate::error::NegForgeError::InvalidParameter(format!(
+                    "cross_section_nm2 must be finite and positive, got {area}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check that the device is long enough to discretize, given the grid
+    /// spacing. Separate from [`Self::validate_params`] because it has to run
+    /// after `l_ds` may have been auto-sized from `lambda`.
+    fn validate_grid(params: &DeviceParams) -> crate::error::Result<()> {
+        let l_g = 2.0 * params.l_ds + params.l_ch;
+        if !(l_g.is_finite() && l_g >= params.a) {
+            return Err(crate::error::NegForgeError::InvalidParameter(format!(
+                "grid spacing a = {} nm is too coarse for a device of total length {} nm: \
+                 the discretization needs at least two grid points",
+                params.a, l_g
+            )));
+        }
         Ok(())
     }
 
@@ -362,15 +388,12 @@ impl Device {
         (params.k_si / params.k_ox * params.d_ch * params.d_ox / params.geo).sqrt()
     }
 
+    /// Grid sizing. Assumes [`Self::validate_params`] and
+    /// [`Self::validate_grid`] have already run, so `a > 0` and the device
+    /// spans at least two points.
     fn compute_grid(params: &DeviceParams) -> (usize, usize, usize) {
         let l_g = 2.0 * params.l_ds + params.l_ch;
-        assert!(
-            params.a > 0.0 && l_g.is_finite() && l_g >= params.a,
-            "grid spacing a = {} nm is too coarse for a device of total length {} nm: \
-             the discretization needs at least two grid points",
-            params.a,
-            l_g
-        );
+        debug_assert!(params.a > 0.0 && l_g.is_finite() && l_g >= params.a);
         let n = (l_g / params.a).floor() as usize + 1;
         let n_left = (params.l_ds / params.a).floor() as usize;
         let n_right = n - n_left;
@@ -494,14 +517,26 @@ impl Device {
 
     /// Set the channel length, re-deriving the grid. Same re-solve contract
     /// as [`Device::set_v_ds`].
-    pub fn set_l_ch(&mut self, l: f64) {
-        self.params.l_ch = l;
+    ///
+    /// Fallible, unlike the bias setters: a channel length changes the grid,
+    /// so it can be rejected the same way [`Device::try_new`] rejects one.
+    pub fn set_l_ch(&mut self, l: f64) -> crate::error::Result<()> {
+        // Same validation as construction: a channel length that can't be
+        // discretized is a caller error, not a panic. Checked on a copy so a
+        // rejected value leaves the device untouched.
+        let mut candidate = self.params;
+        candidate.l_ch = l;
+        Self::validate_params(&candidate)?;
+        Self::validate_grid(&candidate)?;
+
+        self.params = candidate;
         let (n, n_left, n_right) = Self::compute_grid(&self.params);
         self.n = n;
         self.n_left = n_left;
         self.n_right = n_right;
         self.init_vectors();
         self.calc_potential();
+        Ok(())
     }
 }
 
@@ -561,7 +596,7 @@ mod tests {
         assert_eq!(dev.calc_current(), current_after_setter);
 
         // Same for a setter that changes the grid size.
-        dev.set_l_ch(20.0);
+        dev.set_l_ch(20.0).unwrap();
         assert_eq!(dev.psi_f.len(), dev.n);
         assert!(dev.psi_f.iter().all(|v| v.is_finite()));
     }
@@ -611,5 +646,58 @@ mod tests {
             d_ch: -1.0,
             ..Default::default()
         });
+    }
+
+    #[test]
+    fn rejects_a_grid_too_coarse_to_discretize() {
+        // `a` on its own is positive and finite, so this only shows up once
+        // the device length is known — and it must be an error rather than a
+        // panic, since it is reachable straight from user parameters.
+        let err = Device::try_new(DeviceParams {
+            a: 500.0,
+            l_ch: 10.0,
+            l_ds: 10.0,
+            auto_size_contacts: false,
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("too coarse"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_physical_cross_section() {
+        for area in [0.0, -25.0, f64::NAN] {
+            let err = Device::try_new(DeviceParams {
+                cross_section_nm2: Some(area),
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("cross_section_nm2"),
+                "unexpected error for area {area}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_l_ch_rejects_a_bad_length_without_disturbing_the_device() {
+        let mut dev = Device::new(DeviceParams::default());
+        let n_before = dev.n;
+        let psi_f_before = dev.psi_f.clone();
+
+        assert!(dev.set_l_ch(-40.0).is_err());
+        assert!(dev.set_l_ch(f64::NAN).is_err());
+
+        // A rejected length must leave the device exactly as it was, not
+        // half-updated.
+        assert_eq!(dev.n, n_before);
+        assert_eq!(dev.psi_f, psi_f_before);
+        assert_eq!(dev.params.l_ch, DeviceParams::default().l_ch);
+
+        assert!(dev.set_l_ch(20.0).is_ok());
+        assert_ne!(dev.n, n_before);
     }
 }

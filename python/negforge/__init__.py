@@ -37,6 +37,18 @@ class IVCurve:
             if converged is None
             else np.asarray(converged, dtype=bool)
         )
+        # Mismatched lengths would otherwise surface much later as a confusing
+        # masking/plotting error, or silently misalign a curve against the
+        # wrong voltages.
+        shapes = {
+            "voltage": self.voltage.shape,
+            "current": self.current.shape,
+            "converged": self.converged.shape,
+        }
+        if len(set(shapes.values())) != 1:
+            raise ValueError(f"IVCurve arrays must have matching shapes, got {shapes}")
+        if self.voltage.ndim != 1:
+            raise ValueError(f"IVCurve expects 1-D arrays, got {self.voltage.ndim}-D")
 
     def __iter__(self):
         return iter((self.voltage, self.current))
@@ -148,9 +160,11 @@ class Device:
         """Decoupled electrostatic solve (`rho` unchanged). Matches the
         original `calc_potential()`.
 
-        Rarely needed explicitly: construction and the `set_*` methods
-        already leave the potential up to date. It is still the way to
-        re-solve after mutating `rho` yourself.
+        Rarely needed from Python: construction and the `set_*` methods
+        already leave the potential up to date, and `rho` is only written by
+        `solve_self_consistent()` — the `rho` property here returns a copy,
+        so writing to it does not reach the engine. This is exposed mainly
+        for symmetry with the Rust API, where `rho` *is* directly mutable.
         """
         self._inner.calc_potential()
         return self
@@ -221,7 +235,12 @@ class Device:
 
     @property
     def rho(self) -> np.ndarray:
-        """Charge density term entering the electrostatic solve."""
+        """Charge density entering the electrostatic solve, in model units
+        (SI C/m^3 scaled by 1e-18 — see the README's charge-density notes).
+
+        A read-only snapshot: this returns a copy, so mutating it has no
+        effect on the device. `solve_self_consistent()` is what writes it.
+        """
         return np.asarray(self._inner.rho)
 
     @property

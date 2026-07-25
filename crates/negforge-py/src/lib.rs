@@ -150,8 +150,8 @@ impl PyDevice {
         self.inner.set_v_g(v);
     }
 
-    fn set_l_ch(&mut self, l: f64) {
-        self.inner.set_l_ch(l);
+    fn set_l_ch(&mut self, l: f64) -> PyResult<()> {
+        self.inner.set_l_ch(l).map_err(to_py_err)
     }
 
     #[pyo3(signature = (max_iterations=50, tolerance=1e-6, mixing=0.3, eta=None, algorithm="recursive"))]
