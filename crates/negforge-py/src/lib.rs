@@ -9,10 +9,11 @@ use pyo3::prelude::*;
 use negforge_core::{Device, DeviceParams, GreenFunctionAlgorithm, SelfConsistentOptions};
 
 /// Map a [`negforge_core::NegForgeError`] to the appropriate Python
-/// exception type: `InvalidParameter` (bad user input, e.g. a
-/// non-physical device geometry) becomes a `ValueError`, matching Python
-/// convention; everything else (currently just `NotConverged`, a runtime
-/// condition rather than a caller mistake) becomes a `RuntimeError`.
+/// exception type: `InvalidParameter` (bad user input — a non-physical
+/// device geometry, an invalid sweep range, a nonsensical mixing factor)
+/// becomes a `ValueError`, matching Python convention and the `algorithm`
+/// validation below; a failure of the numerics itself (currently just
+/// `NotConverged`) stays a `RuntimeError`.
 fn to_py_err(e: negforge_core::NegForgeError) -> PyErr {
     match e {
         negforge_core::NegForgeError::InvalidParameter(_) => PyValueError::new_err(e.to_string()),
@@ -23,6 +24,13 @@ fn to_py_err(e: negforge_core::NegForgeError) -> PyErr {
 /// Parse the Python-facing `algorithm` string ("recursive" or "dense") into
 /// a [`GreenFunctionAlgorithm`]. See `negforge_core::negf` module docs for
 /// the tradeoff between the two.
+///
+/// The sweep entry points validate `algorithm` eagerly, even when
+/// `self_consistent=false` means no Green's function is ever evaluated:
+/// silently accepting `algorithm="Dense"` or `"recurisve"` there would hide
+/// the typo until the caller flips `self_consistent` on and wonders why
+/// nothing got faster. Rejecting an unknown name is the same argument-
+/// validation error either way.
 fn parse_algorithm(algorithm: &str) -> PyResult<GreenFunctionAlgorithm> {
     match algorithm {
         "recursive" => Ok(GreenFunctionAlgorithm::Recursive),

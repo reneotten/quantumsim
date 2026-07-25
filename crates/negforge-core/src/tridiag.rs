@@ -10,11 +10,19 @@ use num_complex::Complex64;
 ///
 /// `sub[i]` is `A[i+1][i]` (length N-1), `diag[i]` is `A[i][i]` (length N),
 /// `sup[i]` is `A[i][i+1]` (length N-1).
+///
+/// Panics if `n == 0` (there is no system to solve); the degenerate `n == 1`
+/// case is handled directly as a scalar division.
 pub fn solve_real(sub: &[f64], diag: &[f64], sup: &[f64], rhs: &[f64]) -> Vec<f64> {
     let n = diag.len();
+    assert!(n > 0, "tridiagonal solve needs at least one equation");
     assert_eq!(sub.len(), n - 1);
     assert_eq!(sup.len(), n - 1);
     assert_eq!(rhs.len(), n);
+
+    if n == 1 {
+        return vec![rhs[0] / diag[0]];
+    }
 
     let mut c_prime = vec![0.0; n - 1];
     let mut d_prime = vec![0.0; n];
@@ -23,13 +31,8 @@ pub fn solve_real(sub: &[f64], diag: &[f64], sup: &[f64], rhs: &[f64]) -> Vec<f6
     d_prime[0] = rhs[0] / diag[0];
 
     for i in 1..n {
-        let denom = diag[i]
-            - sub[i - 1]
-                * if i - 1 < c_prime.len() {
-                    c_prime[i - 1]
-                } else {
-                    0.0
-                };
+        // `i - 1 <= n - 2`, so `c_prime[i - 1]` is always in bounds here.
+        let denom = diag[i] - sub[i - 1] * c_prime[i - 1];
         if i < n - 1 {
             c_prime[i] = sup[i] / denom;
         }
@@ -49,6 +52,8 @@ pub fn solve_real(sub: &[f64], diag: &[f64], sup: &[f64], rhs: &[f64]) -> Vec<f6
 /// diagonal entries (contact self-energies) and the right-hand side may be
 /// complex (unit vectors when extracting a single column of the Green's
 /// function).
+///
+/// Same degenerate-size contract as [`solve_real`].
 pub fn solve_complex(
     sub: &[f64],
     diag: &[Complex64],
@@ -56,9 +61,14 @@ pub fn solve_complex(
     rhs: &[Complex64],
 ) -> Vec<Complex64> {
     let n = diag.len();
+    assert!(n > 0, "tridiagonal solve needs at least one equation");
     assert_eq!(sub.len(), n - 1);
     assert_eq!(sup.len(), n - 1);
     assert_eq!(rhs.len(), n);
+
+    if n == 1 {
+        return vec![rhs[0] / diag[0]];
+    }
 
     let mut c_prime = vec![Complex64::new(0.0, 0.0); n - 1];
     let mut d_prime = vec![Complex64::new(0.0, 0.0); n];
@@ -145,6 +155,30 @@ mod tests {
         for (a, b) in fast.iter().zip(reference.iter()) {
             assert_relative_eq!(a, b, epsilon = 1e-9);
         }
+    }
+
+    #[test]
+    fn single_equation_systems_are_solved_as_scalars() {
+        // A 1x1 system has no off-diagonals at all; the Thomas recursion has
+        // nothing to eliminate, so it must degenerate to a plain division
+        // rather than indexing into the empty sub/super-diagonals.
+        let x = solve_real(&[], &[4.0], &[], &[2.0]);
+        assert_eq!(x, vec![0.5]);
+
+        let z = solve_complex(
+            &[],
+            &[Complex64::new(0.0, 2.0)],
+            &[],
+            &[Complex64::new(4.0, 0.0)],
+        );
+        assert_relative_eq!(z[0].re, 0.0, epsilon = 1e-12);
+        assert_relative_eq!(z[0].im, -2.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one equation")]
+    fn empty_system_panics_with_a_clear_message() {
+        solve_real(&[], &[], &[], &[]);
     }
 
     #[test]

@@ -304,8 +304,9 @@ speedup:        2.8x-4.0x (varies by run/load)
 
 Bias sweeps (`sweep_v_g`/`sweep_v_ds`) are parallel too, at the *point*
 level rather than the energy level: `set_v_g`/`set_v_ds` reset a device's
-`psi_g`/`psi_bi`/`rho` from scratch (see `Device::init_vectors`), so
-nothing carries over between bias points — each one is evaluated on its
+`psi_g`/`psi_bi`/`rho` from scratch (see `Device::init_vectors`) and
+re-solve `psi_f` for the new bias, so nothing carries over between bias
+points — each one is evaluated on its
 own cloned `Device`, in parallel. This is why `sweep_v_g`/`sweep_v_ds` take
 `&Device` (a template whose bias is varied) rather than `&mut Device`: the
 input device's own state is left untouched, which also fixed a surprising

@@ -287,6 +287,12 @@ impl Device {
             t_hop,
         };
         device.init_vectors();
+        // Leave the device in a self-consistent-with-its-parameters state:
+        // `psi_f`/`psi_0` always reflect the current bias, so `calc_current`
+        // and the NEGF entry points can never read a potential that belongs
+        // to a different device configuration. Same contract as the
+        // `set_*` bias setters below.
+        device.calc_potential();
         Ok(device)
     }
 
@@ -323,6 +329,13 @@ impl Device {
 
     fn compute_grid(params: &DeviceParams) -> (usize, usize, usize) {
         let l_g = 2.0 * params.l_ds + params.l_ch;
+        assert!(
+            params.a > 0.0 && l_g.is_finite() && l_g >= params.a,
+            "grid spacing a = {} nm is too coarse for a device of total length {} nm: \
+             the discretization needs at least two grid points",
+            params.a,
+            l_g
+        );
         let n = (l_g / params.a).floor() as usize + 1;
         let n_left = (params.l_ds / params.a).floor() as usize;
         let n_right = n - n_left;
@@ -403,17 +416,31 @@ impl Device {
         2.0 * E / crate::constants::H * sum * self.params.d_e * E * 1e-3
     }
 
+    /// Set the drain-source bias.
+    ///
+    /// Like the other setters, this rebuilds the drive terms *and* re-solves
+    /// the electrostatic potential, so `psi_f`/`psi_0` are never left over
+    /// from the previous bias point — `calc_current` and the NEGF entry
+    /// points are safe to call immediately afterwards. Note that this resets
+    /// `rho` to zero (see `init_vectors`), so the re-solve is the decoupled
+    /// one; a self-consistent result has to be re-established by calling
+    /// [`crate::selfconsistent::solve_self_consistent`] again.
     pub fn set_v_ds(&mut self, v: f64) {
         self.params.v_ds = v;
         self.e_fd = -v + 0.05;
         self.init_vectors();
+        self.calc_potential();
     }
 
+    /// Set the gate bias. Same re-solve contract as [`Device::set_v_ds`].
     pub fn set_v_g(&mut self, v: f64) {
         self.params.v_g = v;
         self.init_vectors();
+        self.calc_potential();
     }
 
+    /// Set the channel length, re-deriving the grid. Same re-solve contract
+    /// as [`Device::set_v_ds`].
     pub fn set_l_ch(&mut self, l: f64) {
         self.params.l_ch = l;
         let (n, n_left, n_right) = Self::compute_grid(&self.params);
@@ -421,6 +448,7 @@ impl Device {
         self.n_left = n_left;
         self.n_right = n_right;
         self.init_vectors();
+        self.calc_potential();
     }
 }
 
@@ -463,13 +491,34 @@ mod tests {
     }
 
     #[test]
+    fn bias_setters_leave_the_potential_up_to_date() {
+        // A bias setter must not leave `psi_f`/`psi_0` describing the
+        // previous bias point: calling `calc_current()` straight after a
+        // setter has to give the same answer as an explicit re-solve.
+        let mut dev = Device::new(DeviceParams::default());
+
+        dev.set_v_ds(0.3);
+        let psi_f_after_setter = dev.psi_f.clone();
+        let psi_0_after_setter = dev.psi_0;
+        let current_after_setter = dev.calc_current();
+
+        dev.calc_potential();
+        assert_eq!(dev.psi_f, psi_f_after_setter);
+        assert_eq!(dev.psi_0, psi_0_after_setter);
+        assert_eq!(dev.calc_current(), current_after_setter);
+
+        // Same for a setter that changes the grid size.
+        dev.set_l_ch(20.0);
+        assert_eq!(dev.psi_f.len(), dev.n);
+        assert!(dev.psi_f.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
     fn increasing_v_ds_increases_current() {
         let mut dev = Device::new(DeviceParams::default());
-        dev.calc_potential();
         let i0 = dev.calc_current();
 
         dev.set_v_ds(0.3);
-        dev.calc_potential();
         let i1 = dev.calc_current();
 
         assert!(
@@ -482,11 +531,9 @@ mod tests {
     fn increasing_v_g_increases_current_ballistic_mosfet() {
         let mut dev = Device::new(DeviceParams::default());
         dev.set_v_ds(0.3);
-        dev.calc_potential();
         let i0 = dev.calc_current();
 
         dev.set_v_g(0.3);
-        dev.calc_potential();
         let i1 = dev.calc_current();
 
         assert!(

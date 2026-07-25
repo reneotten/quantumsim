@@ -35,12 +35,35 @@ class IVCurve:
     def subthreshold_swing(self, v_min: float = 0.0, v_max: float = 0.4) -> float:
         """Subthreshold swing from a `log10(I)` vs voltage linear fit over
         `[v_min, v_max]`, matching `plot_Vg_I`'s `polyfit` step in the
-        original MATLAB code."""
+        original MATLAB code.
+
+        The fit only means anything for strictly positive, finite currents;
+        a zero/negative current (numerical noise deep in the off state, or a
+        bias range where the ballistic window collapses) would make `log10`
+        return `-inf`/`nan` and silently poison the fit, so it raises
+        `ValueError` instead.
+        """
         mask = (self.voltage >= v_min) & (self.voltage <= v_max)
         if mask.sum() < 2:
             raise ValueError("not enough points in [v_min, v_max] to fit a swing")
-        log_i = np.log10(self.current[mask])
+        current = self.current[mask]
+        if not np.all(np.isfinite(current)) or np.any(current <= 0.0):
+            bad = self.voltage[mask][~(np.isfinite(current) & (current > 0.0))]
+            raise ValueError(
+                "subthreshold swing needs strictly positive, finite currents for the "
+                f"log10 fit; {len(bad)} point(s) in [{v_min}, {v_max}] fail this, "
+                f"starting at V = {bad[0]:g}"
+            )
+        log_i = np.log10(current)
         slope, _ = np.polyfit(self.voltage[mask], log_i, 1)
+        # `np.polyfit` on a perfectly flat curve returns a tiny non-zero
+        # slope from the least-squares solve, so check the data too rather
+        # than trusting `slope == 0` alone.
+        if not np.isfinite(slope) or slope == 0.0 or np.ptp(log_i) == 0.0:
+            raise ValueError(
+                f"degenerate subthreshold-swing fit (slope {slope}): the current does "
+                f"not vary with voltage over [{v_min}, {v_max}]"
+            )
         return 1.0 / slope
 
 
@@ -58,8 +81,10 @@ class Device:
     """
 
     def __init__(self, **kwargs):
+        # The Rust constructor already solves the electrostatic potential,
+        # and so do the bias setters — a freshly built or re-biased device
+        # is always ready for `calc_current()`/`local_density_of_states()`.
         self._inner = _RustDevice(**kwargs)
-        self._inner.calc_potential()
 
     def __repr__(self):
         return f"Device(n={self.n}, a={self.a} nm, screening_length={self.screening_length:.3f} nm)"
@@ -102,7 +127,12 @@ class Device:
 
     def calc_potential(self) -> "Device":
         """Decoupled electrostatic solve (`rho` unchanged). Matches the
-        original `calc_potential()`."""
+        original `calc_potential()`.
+
+        Rarely needed explicitly: construction and the `set_*` methods
+        already leave the potential up to date. It is still the way to
+        re-solve after mutating `rho` yourself.
+        """
         self._inner.calc_potential()
         return self
 
@@ -117,7 +147,8 @@ class Device:
         """Run the self-consistent Poisson<->NEGF loop (not present in the
         original MATLAB code — see the top-level README). Returns
         `(iterations, residual)` on success; raises `RuntimeError` if it
-        does not converge within `max_iterations`.
+        does not converge within `max_iterations`, or `ValueError` for
+        out-of-range arguments.
 
         `algorithm` is `"recursive"` (default, O(N) per NEGF energy point)
         or `"dense"` (O(N^3), matching the original MATLAB `inv()` call).
@@ -129,16 +160,26 @@ class Device:
         return self._inner.solve_self_consistent(max_iterations, tolerance, mixing, eta, algorithm)
 
     # -- bias control --------------------------------------------------------
+    #
+    # Each setter re-solves the decoupled electrostatic potential, so
+    # `calc_current()`/`local_density_of_states()` can be called straight
+    # afterwards without a stale potential from the previous bias point.
+    # Note this also resets `rho` to zero: re-run `solve_self_consistent()`
+    # if you want a self-consistent result at the new bias.
 
     def set_v_ds(self, v: float) -> "Device":
+        """Set the drain-source bias and re-solve the potential."""
         self._inner.set_v_ds(v)
         return self
 
     def set_v_g(self, v: float) -> "Device":
+        """Set the gate bias and re-solve the potential."""
         self._inner.set_v_g(v)
         return self
 
     def set_l_ch(self, l: float) -> "Device":
+        """Set the channel length (re-deriving the grid) and re-solve the
+        potential."""
         self._inner.set_l_ch(l)
         return self
 
@@ -197,8 +238,13 @@ class Device:
     ) -> IVCurve:
         """Gate-voltage sweep at the device's current drain bias. Matches
         `plot_Vg_I`. Points run in parallel across CPU cores and don't
-        mutate this device. `algorithm` (`"recursive"`/`"dense"`) only
-        matters when `self_consistent=True` — see `solve_self_consistent`.
+        mutate this device.
+
+        `algorithm` (`"recursive"`/`"dense"`) only changes the *result* when
+        `self_consistent=True` — see `solve_self_consistent` — but it is
+        always validated, so a misspelled name raises `ValueError` either
+        way rather than being silently ignored. `v_min`/`v_max`/`step` must
+        describe a forward range with a positive step.
         """
         voltage, current = self._inner.sweep_v_g(v_min, v_max, step, self_consistent, algorithm)
         return IVCurve(voltage, current)
@@ -213,8 +259,13 @@ class Device:
     ) -> IVCurve:
         """Drain-voltage sweep at the device's current gate bias. Matches
         `plot_Vds_I`. Points run in parallel across CPU cores and don't
-        mutate this device. `algorithm` (`"recursive"`/`"dense"`) only
-        matters when `self_consistent=True` — see `solve_self_consistent`.
+        mutate this device.
+
+        `algorithm` (`"recursive"`/`"dense"`) only changes the *result* when
+        `self_consistent=True` — see `solve_self_consistent` — but it is
+        always validated, so a misspelled name raises `ValueError` either
+        way rather than being silently ignored. `v_min`/`v_max`/`step` must
+        describe a forward range with a positive step.
         """
         voltage, current = self._inner.sweep_v_ds(v_min, v_max, step, self_consistent, algorithm)
         return IVCurve(voltage, current)
