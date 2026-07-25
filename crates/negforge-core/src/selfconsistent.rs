@@ -37,7 +37,7 @@ use crate::charge;
 use crate::constants::E as ELEMENTARY_CHARGE;
 use crate::device::Device;
 use crate::error::{NegForgeError, Result};
-use crate::negf::{self, GreenFunctionResult};
+use crate::negf::{self, GreenFunctionAlgorithm, GreenFunctionResult};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SelfConsistentOptions {
@@ -61,6 +61,11 @@ pub struct SelfConsistentOptions {
     /// resolution (at the cost of a noisier, potentially non-converging
     /// iteration).
     pub eta: f64,
+    /// Which NEGF algorithm to use for the sweep inside each iteration.
+    /// Defaults to `Recursive` (O(N)) — see `negf.rs` module docs for the
+    /// dense-vs-recursive tradeoff. `Dense` works too, just far slower per
+    /// iteration; mainly useful for cross-validating a suspicious result.
+    pub algorithm: GreenFunctionAlgorithm,
 }
 
 impl Default for SelfConsistentOptions {
@@ -71,6 +76,7 @@ impl Default for SelfConsistentOptions {
             mixing: 0.3,
             green_energy_fraction: 0.7,
             eta: 0.08,
+            algorithm: GreenFunctionAlgorithm::Recursive,
         }
     }
 }
@@ -109,7 +115,7 @@ pub fn solve_self_consistent(
     let mut last_residual = f64::INFINITY;
     for iteration in 1..=opts.max_iterations {
         let energies = negf_energy_grid(device, opts.green_energy_fraction);
-        let green = negf::green_function_sweep(device, &energies, opts.eta);
+        let green = negf::green_function_sweep(device, &energies, opts.eta, opts.algorithm);
         let n_electron = charge::electron_density(
             &green,
             device.t_hop,
@@ -177,12 +183,50 @@ mod tests {
             mixing: 0.3,
             green_energy_fraction: 0.7,
             eta: 0.04,
+            algorithm: GreenFunctionAlgorithm::Recursive,
         };
         let result = solve_self_consistent(&mut device, &opts).expect("should converge");
         assert!(result.residual < opts.tolerance);
         assert_eq!(result.electron_density.len(), device.n);
         assert!(result.electron_density.iter().all(|v| v.is_finite()));
         assert!(device.psi_f.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn dense_and_recursive_converge_to_the_same_potential() {
+        let make_device = || {
+            Device::new(DeviceParams {
+                a: 1.0,
+                l_ch: 10.0,
+                l_ds: 10.0,
+                auto_size_contacts: false,
+                d_e: 0.01,
+                ..Default::default()
+            })
+        };
+        let base_opts = SelfConsistentOptions {
+            max_iterations: 100,
+            tolerance: 1e-5,
+            mixing: 0.3,
+            green_energy_fraction: 0.7,
+            eta: 0.04,
+            algorithm: GreenFunctionAlgorithm::Recursive,
+        };
+
+        let mut recursive_device = make_device();
+        solve_self_consistent(&mut recursive_device, &base_opts)
+            .expect("recursive should converge");
+
+        let mut dense_device = make_device();
+        let dense_opts = SelfConsistentOptions {
+            algorithm: GreenFunctionAlgorithm::Dense,
+            ..base_opts
+        };
+        solve_self_consistent(&mut dense_device, &dense_opts).expect("dense should converge");
+
+        for (a, b) in recursive_device.psi_f.iter().zip(dense_device.psi_f.iter()) {
+            assert!((a - b).abs() < 1e-4, "psi_f mismatch: {a} vs {b}");
+        }
     }
 
     #[test]

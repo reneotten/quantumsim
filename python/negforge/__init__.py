@@ -78,13 +78,21 @@ class Device:
         tolerance: float = 1e-6,
         mixing: float = 0.3,
         eta: float = 0.08,
+        algorithm: str = "recursive",
     ) -> tuple[int, float]:
         """Run the self-consistent Poisson<->NEGF loop (not present in the
         original MATLAB code — see the top-level README). Returns
         `(iterations, residual)` on success; raises `RuntimeError` if it
         does not converge within `max_iterations`.
+
+        `algorithm` is `"recursive"` (default, O(N) per NEGF energy point)
+        or `"dense"` (O(N^3), matching the original MATLAB `inv()` call).
+        Recursive is what you want for anything but cross-validating a
+        suspicious result — each iteration here runs a full NEGF sweep, and
+        dense makes that dramatically slower. See the README's "Performance"
+        section for the tradeoff and benchmark numbers.
         """
-        return self._inner.solve_self_consistent(max_iterations, tolerance, mixing, eta)
+        return self._inner.solve_self_consistent(max_iterations, tolerance, mixing, eta, algorithm)
 
     # -- bias control --------------------------------------------------------
 
@@ -132,24 +140,47 @@ class Device:
         """Natural (screening) length lambda, nm."""
         return self._inner.screening_length
 
-    def local_density_of_states(self):
+    def local_density_of_states(self, algorithm: str = "recursive"):
         """NEGF sweep at the device's current potential.
 
         Returns `(energies, ldos)` where `ldos[k]` is the local density of
         states across all grid sites at `energies[k]`. Matches
-        `calc_green()`'s `G_r_diag` in the original code.
+        `calc_green()`'s `G_r_diag` in the original code. Energy points run
+        in parallel across CPU cores. `algorithm` is `"recursive"` (default)
+        or `"dense"` — see `solve_self_consistent` / the README for the
+        tradeoff.
         """
-        energies, ldos = self._inner.local_density_of_states()
+        energies, ldos = self._inner.local_density_of_states(algorithm)
         return np.asarray(energies), np.asarray(ldos)
 
-    def sweep_v_g(self, v_min: float, v_max: float, step: float, self_consistent: bool = False) -> IVCurve:
+    def sweep_v_g(
+        self,
+        v_min: float,
+        v_max: float,
+        step: float,
+        self_consistent: bool = False,
+        algorithm: str = "recursive",
+    ) -> IVCurve:
         """Gate-voltage sweep at the device's current drain bias. Matches
-        `plot_Vg_I`."""
-        voltage, current = self._inner.sweep_v_g(v_min, v_max, step, self_consistent)
+        `plot_Vg_I`. Points run in parallel across CPU cores and don't
+        mutate this device. `algorithm` (`"recursive"`/`"dense"`) only
+        matters when `self_consistent=True` — see `solve_self_consistent`.
+        """
+        voltage, current = self._inner.sweep_v_g(v_min, v_max, step, self_consistent, algorithm)
         return IVCurve(voltage, current)
 
-    def sweep_v_ds(self, v_min: float, v_max: float, step: float, self_consistent: bool = False) -> IVCurve:
+    def sweep_v_ds(
+        self,
+        v_min: float,
+        v_max: float,
+        step: float,
+        self_consistent: bool = False,
+        algorithm: str = "recursive",
+    ) -> IVCurve:
         """Drain-voltage sweep at the device's current gate bias. Matches
-        `plot_Vds_I`."""
-        voltage, current = self._inner.sweep_v_ds(v_min, v_max, step, self_consistent)
+        `plot_Vds_I`. Points run in parallel across CPU cores and don't
+        mutate this device. `algorithm` (`"recursive"`/`"dense"`) only
+        matters when `self_consistent=True` — see `solve_self_consistent`.
+        """
+        voltage, current = self._inner.sweep_v_ds(v_min, v_max, step, self_consistent, algorithm)
         return IVCurve(voltage, current)

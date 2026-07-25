@@ -1,5 +1,17 @@
 //! Bias sweeps and derived figures of merit (subthreshold swing), mirroring
 //! `plot_Vg_I`, `plot_Vds_I` and `plot_S` in `legacy_matlab/quantumsim.m`.
+//!
+//! Each bias point in a sweep is fully independent: `set_v_g`/`set_v_ds`
+//! reset `psi_g`, `psi_bi` and `rho` from scratch (see `Device::init_vectors`),
+//! so nothing carries over from one point to the next. That makes a sweep
+//! embarrassingly parallel — each point runs on its own cloned `Device` via
+//! `rayon`, which matters most for self-consistent sweeps (each point is a
+//! full Poisson<->NEGF iteration, the most expensive operation in this
+//! crate). The sweep functions therefore take `&Device` (a template whose
+//! bias is varied) rather than `&mut Device`: the input device's own state
+//! is left untouched.
+
+use rayon::prelude::*;
 
 use crate::device::Device;
 use crate::error::Result;
@@ -21,54 +33,54 @@ fn inclusive_range(min: f64, max: f64, step: f64) -> Vec<f64> {
     (0..=steps).map(|i| min + i as f64 * step).collect()
 }
 
-/// Gate-voltage sweep at fixed drain bias. Mirrors `plot_Vg_I`.
-pub fn sweep_v_g(
-    device: &mut Device,
-    v_min: f64,
-    v_max: f64,
-    step: f64,
+fn one_point(
+    device: &Device,
+    voltage: f64,
     self_consistency: SelfConsistency,
-) -> Result<Vec<IvPoint>> {
-    let mut points = Vec::new();
-    for v in inclusive_range(v_min, v_max, step) {
-        device.set_v_g(v);
-        match self_consistency {
-            Some(opts) => {
-                selfconsistent::solve_self_consistent(device, opts)?;
-            }
-            None => device.calc_potential(),
+    set_bias: impl Fn(&mut Device, f64),
+) -> Result<IvPoint> {
+    let mut dev = device.clone();
+    set_bias(&mut dev, voltage);
+    match self_consistency {
+        Some(opts) => {
+            selfconsistent::solve_self_consistent(&mut dev, opts)?;
         }
-        points.push(IvPoint {
-            voltage: v,
-            current: device.calc_current(),
-        });
+        None => dev.calc_potential(),
     }
-    Ok(points)
+    Ok(IvPoint {
+        voltage,
+        current: dev.calc_current(),
+    })
 }
 
-/// Drain-voltage sweep at fixed gate bias. Mirrors `plot_Vds_I`.
-pub fn sweep_v_ds(
-    device: &mut Device,
+/// Gate-voltage sweep at fixed drain bias. Mirrors `plot_Vg_I`. Points are
+/// evaluated in parallel (see module docs).
+pub fn sweep_v_g(
+    device: &Device,
     v_min: f64,
     v_max: f64,
     step: f64,
     self_consistency: SelfConsistency,
 ) -> Result<Vec<IvPoint>> {
-    let mut points = Vec::new();
-    for v in inclusive_range(v_min, v_max, step) {
-        device.set_v_ds(v);
-        match self_consistency {
-            Some(opts) => {
-                selfconsistent::solve_self_consistent(device, opts)?;
-            }
-            None => device.calc_potential(),
-        }
-        points.push(IvPoint {
-            voltage: v,
-            current: device.calc_current(),
-        });
-    }
-    Ok(points)
+    inclusive_range(v_min, v_max, step)
+        .into_par_iter()
+        .map(|v| one_point(device, v, self_consistency, Device::set_v_g))
+        .collect()
+}
+
+/// Drain-voltage sweep at fixed gate bias. Mirrors `plot_Vds_I`. Points are
+/// evaluated in parallel (see module docs).
+pub fn sweep_v_ds(
+    device: &Device,
+    v_min: f64,
+    v_max: f64,
+    step: f64,
+    self_consistency: SelfConsistency,
+) -> Result<Vec<IvPoint>> {
+    inclusive_range(v_min, v_max, step)
+        .into_par_iter()
+        .map(|v| one_point(device, v, self_consistency, Device::set_v_ds))
+        .collect()
 }
 
 /// Ordinary least-squares fit `y = slope * x + intercept`.
@@ -108,11 +120,11 @@ mod tests {
 
     #[test]
     fn v_g_sweep_produces_monotonic_current_for_ballistic_mosfet() {
-        let mut device = Device::new(DeviceParams {
+        let device = Device::new(DeviceParams {
             v_ds: 0.3,
             ..Default::default()
         });
-        let points = sweep_v_g(&mut device, 0.0, 0.4, 0.05, None).unwrap();
+        let points = sweep_v_g(&device, 0.0, 0.4, 0.05, None).unwrap();
         assert_eq!(points.len(), 9);
         for w in points.windows(2) {
             assert!(
@@ -124,13 +136,26 @@ mod tests {
 
     #[test]
     fn subthreshold_swing_is_positive_for_a_reasonable_device() {
-        let mut device = Device::new(DeviceParams {
+        let device = Device::new(DeviceParams {
             v_ds: 0.3,
             ..Default::default()
         });
-        let points = sweep_v_g(&mut device, 0.0, 0.4, 0.02, None).unwrap();
+        let points = sweep_v_g(&device, 0.0, 0.4, 0.02, None).unwrap();
         let s = subthreshold_swing(&points, 0.0, 0.4);
         assert!(s > 0.0 && s.is_finite());
+    }
+
+    #[test]
+    fn sweep_does_not_mutate_the_input_device() {
+        let device = Device::new(DeviceParams {
+            v_ds: 0.3,
+            ..Default::default()
+        });
+        let psi_f_before = device.psi_f.clone();
+        let v_g_before = device.params.v_g;
+        let _ = sweep_v_g(&device, 0.0, 0.4, 0.05, None).unwrap();
+        assert_eq!(device.psi_f, psi_f_before);
+        assert_eq!(device.params.v_g, v_g_before);
     }
 
     #[test]
