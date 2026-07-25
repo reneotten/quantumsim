@@ -138,7 +138,7 @@ pub struct GreenFunctionResult {
     /// Energy grid, eV.
     pub energies: Vec<f64>,
     /// `-Im(G_ii(E)) / a` for every site `i`, indexed `[energy][site]`.
-    /// Proportional to the local density of states (`pi * a` times this is
+    /// Proportional to the local density of states (`(a / pi)` times this is
     /// the textbook LDOS `-Im(G_ii)/pi`; the original MATLAB `G_r_diag`
     /// carried neither the minus sign nor the `1/pi`, see the module docs'
     /// "Contact self-energies" section for why the sign is corrected here).
