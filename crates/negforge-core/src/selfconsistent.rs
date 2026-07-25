@@ -201,9 +201,9 @@ mod tests {
         assert!(result.residual < opts.tolerance);
         assert_eq!(result.electron_density.len(), device.n);
         // Structurally guaranteed (electron_density is a sum of |G|^2-weighted
-        // terms, see charge.rs), independent of the contact self-energy sign
-        // question discussed in negf.rs — worth locking in as a regression
-        // check since it's the one physical positivity requirement the loop
+        // terms, see charge.rs) regardless of the contact self-energy sign
+        // convention in negf.rs — worth locking in as a regression check
+        // since it's the one physical positivity requirement the loop
         // actually depends on.
         assert!(result
             .electron_density
