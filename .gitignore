@@ -1,0 +1,21 @@
+/target/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+*.whl
+*.so
+*.pyd
+*.dylib
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors / OS
+.DS_Store
+*.swp

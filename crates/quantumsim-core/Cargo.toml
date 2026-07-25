@@ -1,0 +1,13 @@
+[package]
+name = "quantumsim-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "1D ballistic MOSFET electrostatics + NEGF transport engine"
+
+[dependencies]
+num-complex = "0.4"
+thiserror = "1"
+
+[dev-dependencies]
+approx = "0.5"

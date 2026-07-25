@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "quantumsim"
+version = "0.1.0"
+description = "1D ballistic-MOSFET electrostatics + NEGF transport simulator (Rust engine, Python frontend)"
+requires-python = ">=3.9"
+readme = "README.md"
+license = { text = "MIT" }
+dependencies = ["numpy>=1.22"]
+
+[project.optional-dependencies]
+notebook = ["jupyter", "matplotlib", "ipywidgets"]
+
+[tool.maturin]
+manifest-path = "crates/quantumsim-py/Cargo.toml"
+python-source = "python"
+module-name = "quantumsim._quantumsim"
+features = ["pyo3/extension-module"]
