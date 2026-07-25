@@ -3,7 +3,7 @@ requires = ["maturin>=1.5,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "quantumsim"
+name = "negforge"
 version = "0.1.0"
 description = "1D ballistic-MOSFET electrostatics + NEGF transport simulator (Rust engine, Python frontend)"
 requires-python = ">=3.9"
@@ -15,7 +15,7 @@ dependencies = ["numpy>=1.22"]
 notebook = ["jupyter", "matplotlib", "ipywidgets"]
 
 [tool.maturin]
-manifest-path = "crates/quantumsim-py/Cargo.toml"
+manifest-path = "crates/negforge-py/Cargo.toml"
 python-source = "python"
-module-name = "quantumsim._quantumsim"
+module-name = "negforge._negforge"
 features = ["pyo3/extension-module"]

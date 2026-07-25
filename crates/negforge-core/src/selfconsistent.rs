@@ -36,7 +36,7 @@
 use crate::charge;
 use crate::constants::E as ELEMENTARY_CHARGE;
 use crate::device::Device;
-use crate::error::{QuantumSimError, Result};
+use crate::error::{NegForgeError, Result};
 use crate::negf::{self, GreenFunctionResult};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -98,7 +98,7 @@ pub fn solve_self_consistent(
     opts: &SelfConsistentOptions,
 ) -> Result<SelfConsistentResult> {
     if !(0.0 < opts.mixing && opts.mixing <= 1.0) {
-        return Err(QuantumSimError::InvalidParameter(format!(
+        return Err(NegForgeError::InvalidParameter(format!(
             "mixing must be in (0, 1], got {}",
             opts.mixing
         )));
@@ -148,7 +148,7 @@ pub fn solve_self_consistent(
         }
     }
 
-    Err(QuantumSimError::NotConverged {
+    Err(NegForgeError::NotConverged {
         iterations: opts.max_iterations,
         residual: last_residual,
         tolerance: opts.tolerance,

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/quantumsim-core", "crates/quantumsim-py"]
+members = ["crates/negforge-core", "crates/negforge-py"]
 
 [workspace.package]
 version = "0.1.0"

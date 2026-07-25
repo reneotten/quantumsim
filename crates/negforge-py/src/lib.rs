@@ -6,13 +6,13 @@
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
-use quantumsim_core::{Device, DeviceParams, SelfConsistentOptions};
+use negforge_core::{Device, DeviceParams, SelfConsistentOptions};
 
-fn to_py_err(e: quantumsim_core::QuantumSimError) -> PyErr {
+fn to_py_err(e: negforge_core::NegForgeError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
-/// Python-facing wrapper around [`quantumsim_core::Device`].
+/// Python-facing wrapper around [`negforge_core::Device`].
 #[pyclass(name = "Device")]
 struct PyDevice {
     inner: Device,
@@ -66,7 +66,7 @@ impl PyDevice {
             e_fs,
             t,
             d_e,
-            m_eff: 0.9 * quantumsim_core::constants::M_E,
+            m_eff: 0.9 * negforge_core::constants::M_E,
         };
         Self {
             inner: Device::new(params),
@@ -108,7 +108,7 @@ impl PyDevice {
             green_energy_fraction: 0.7,
             eta,
         };
-        let result = quantumsim_core::selfconsistent::solve_self_consistent(&mut self.inner, &opts)
+        let result = negforge_core::selfconsistent::solve_self_consistent(&mut self.inner, &opts)
             .map_err(to_py_err)?;
         Ok((result.iterations, result.residual))
     }
@@ -155,7 +155,7 @@ impl PyDevice {
     ) -> PyResult<(Vec<f64>, Vec<f64>)> {
         let opts = SelfConsistentOptions::default();
         let sc = if self_consistent { Some(&opts) } else { None };
-        let points = quantumsim_core::sweep::sweep_v_g(&mut self.inner, v_min, v_max, step, sc)
+        let points = negforge_core::sweep::sweep_v_g(&mut self.inner, v_min, v_max, step, sc)
             .map_err(to_py_err)?;
         Ok((
             points.iter().map(|p| p.voltage).collect(),
@@ -172,7 +172,7 @@ impl PyDevice {
     ) -> PyResult<(Vec<f64>, Vec<f64>)> {
         let opts = SelfConsistentOptions::default();
         let sc = if self_consistent { Some(&opts) } else { None };
-        let points = quantumsim_core::sweep::sweep_v_ds(&mut self.inner, v_min, v_max, step, sc)
+        let points = negforge_core::sweep::sweep_v_ds(&mut self.inner, v_min, v_max, step, sc)
             .map_err(to_py_err)?;
         Ok((
             points.iter().map(|p| p.voltage).collect(),
@@ -194,17 +194,17 @@ impl PyDevice {
         let d_e = self.inner.params.d_e;
         let steps = ((e_max - e_min) / d_e).floor().max(0.0) as usize;
         let energies: Vec<f64> = (0..=steps).map(|k| e_min + k as f64 * d_e).collect();
-        let result = quantumsim_core::negf::green_function_sweep(
+        let result = negforge_core::negf::green_function_sweep(
             &self.inner,
             &energies,
-            quantumsim_core::negf::DEFAULT_ETA,
+            negforge_core::negf::DEFAULT_ETA,
         );
         (result.energies, result.g_diag)
     }
 }
 
 #[pymodule]
-fn _quantumsim(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _negforge(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDevice>()?;
     Ok(())
 }

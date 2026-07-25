@@ -5,8 +5,8 @@
 //! gate bias) rather than just checking the tiny unit-test-scale device in
 //! `selfconsistent.rs`.
 
-use quantumsim_core::selfconsistent::solve_self_consistent;
-use quantumsim_core::{Device, DeviceParams, SelfConsistentOptions};
+use negforge_core::selfconsistent::solve_self_consistent;
+use negforge_core::{Device, DeviceParams, SelfConsistentOptions};
 
 #[test]
 fn self_consistent_current_increases_with_gate_bias_at_default_scale() {

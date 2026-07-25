@@ -54,6 +54,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "negforge-core"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "num-complex",
+ "thiserror",
+]
+
+[[package]]
+name = "negforge-py"
+version = "0.1.0"
+dependencies = [
+ "negforge-core",
+ "pyo3",
+]
+
+[[package]]
 name = "num-complex"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -153,23 +170,6 @@ dependencies = [
  "pyo3-build-config",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "quantumsim-core"
-version = "0.1.0"
-dependencies = [
- "approx",
- "num-complex",
- "thiserror",
-]
-
-[[package]]
-name = "quantumsim-py"
-version = "0.1.0"
-dependencies = [
- "pyo3",
- "quantumsim-core",
 ]
 
 [[package]]

@@ -1,8 +1,8 @@
-"""quantumsim: 1D ballistic-MOSFET electrostatics + NEGF transport simulator.
+"""NEGForge: 1D ballistic-MOSFET electrostatics + NEGF transport simulator.
 
 The numerical engine (self-consistent Poisson/NEGF solve, tridiagonal linear
 algebra, recursive Green's-function evaluation) lives in Rust
-(``quantumsim-core``, exposed here via PyO3 as ``quantumsim._quantumsim``).
+(``negforge-core``, exposed here via PyO3 as ``negforge._negforge``).
 This package is a thin, notebook-friendly Python wrapper around it: numpy
 arrays instead of raw tuples, keyword-argument device construction, and a
 small `IVCurve` helper for bias sweeps. See the top-level repository README
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._quantumsim import Device as _RustDevice
+from ._negforge import Device as _RustDevice
 
 __all__ = ["Device", "IVCurve"]
 
@@ -52,7 +52,7 @@ class Device:
     arguments match the Rust `DeviceParams` field names (see the top-level
     README for units and defaults), e.g.::
 
-        dev = quantumsim.Device(v_ds=0.3, v_g=0.2, l_ch=40.0)
+        dev = negforge.Device(v_ds=0.3, v_g=0.2, l_ch=40.0)
         dev.solve_self_consistent()
         current = dev.calc_current()
     """

@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum QuantumSimError {
+pub enum NegForgeError {
     #[error("self-consistent loop did not converge after {iterations} iterations (residual {residual:.3e}, tolerance {tolerance:.3e})")]
     NotConverged {
         iterations: usize,
@@ -12,4 +12,4 @@ pub enum QuantumSimError {
     InvalidParameter(String),
 }
 
-pub type Result<T> = std::result::Result<T, QuantumSimError>;
+pub type Result<T> = std::result::Result<T, NegForgeError>;

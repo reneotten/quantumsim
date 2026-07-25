@@ -1,4 +1,4 @@
-# quantumsim
+# NEGForge
 
 A 1D ballistic-MOSFET electrostatics + NEGF (Non-Equilibrium Green's
 Function) transport simulator. The numerical engine is Rust; the frontend
@@ -15,20 +15,20 @@ does.
 ## Architecture
 
 ```
-crates/quantumsim-core/   Pure-Rust physics engine (no Python dependency)
-crates/quantumsim-py/     PyO3 bindings, compiled to the native module
-                           quantumsim._quantumsim
-python/quantumsim/        Pythonic wrapper package (numpy arrays, keyword
-                           device construction, IVCurve helper)
-notebooks/                Jupyter notebook frontend
-legacy_matlab/            Original MATLAB code, kept for reference
+crates/negforge-core/   Pure-Rust physics engine (no Python dependency)
+crates/negforge-py/     PyO3 bindings, compiled to the native module
+                         negforge._negforge
+python/negforge/        Pythonic wrapper package (numpy arrays, keyword
+                         device construction, IVCurve helper)
+notebooks/               Jupyter notebook frontend
+legacy_matlab/           Original MATLAB code, kept for reference
 ```
 
-`quantumsim-core` has no PyO3/Python dependency at all — it's a normal Rust
+`negforge-core` has no PyO3/Python dependency at all — it's a normal Rust
 library with its own unit and integration tests, usable from any Rust
-program. `quantumsim-py` is a thin binding layer on top of it.
+program. `negforge-py` is a thin binding layer on top of it.
 
-### `quantumsim-core` modules
+### `negforge-core` modules
 
 - `constants` — physical constants (elementary charge, k_B, h, hbar,
   electron mass), replacing the undefined `util.const` package the
@@ -65,15 +65,15 @@ cargo test --workspace
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install maturin
-maturin develop --release          # builds quantumsim-py and installs it editable
+maturin develop --release          # builds negforge-py and installs it editable
 pip install -e ".[notebook]"       # jupyter, matplotlib, ipywidgets
-jupyter notebook notebooks/quantumsim_demo.ipynb
+jupyter notebook notebooks/negforge_demo.ipynb
 ```
 
-`maturin develop` compiles `crates/quantumsim-py` and installs the
-resulting extension inside the `python/quantumsim/` package (as
-`quantumsim._quantumsim`); `python/quantumsim/__init__.py` wraps it in a
-friendlier, numpy-returning API (`quantumsim.Device`, `quantumsim.IVCurve`).
+`maturin develop` compiles `crates/negforge-py` and installs the
+resulting extension inside the `python/negforge/` package (as
+`negforge._negforge`); `python/negforge/__init__.py` wraps it in a
+friendlier, numpy-returning API (`negforge.Device`, `negforge.IVCurve`).
 
 ## Physics model
 
@@ -170,15 +170,15 @@ in the way of that loop actually doing something.
 
 ## Testing
 
-- `crates/quantumsim-core/src/*.rs` — unit tests per module, including
+- `crates/negforge-core/src/*.rs` — unit tests per module, including
   cross-checks of the O(N) tridiagonal/recursive-Green's-function solvers
   against dense (Gaussian-elimination / full-matrix-inversion) reference
   implementations on small systems.
-- `crates/quantumsim-core/tests/self_consistent_realistic_device.rs` — an
+- `crates/negforge-core/tests/self_consistent_realistic_device.rs` — an
   integration test at the model's default (non-toy) device scale,
   confirming the self-consistent loop converges and reproduces the
   expected ballistic-MOSFET trend (current increasing with gate bias).
-- `notebooks/quantumsim_demo.ipynb` has been executed end-to-end
+- `notebooks/negforge_demo.ipynb` has been executed end-to-end
   (`jupyter nbconvert --execute`) to confirm the full frontend path works;
   outputs are cleared before committing since they go stale the moment the
   engine changes.

@@ -1,14 +1,14 @@
 [package]
-name = "quantumsim-py"
+name = "negforge-py"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "PyO3 bindings for quantumsim-core"
+description = "PyO3 bindings for negforge-core"
 
 [lib]
-name = "_quantumsim"
+name = "_negforge"
 crate-type = ["cdylib"]
 
 [dependencies]
-quantumsim-core = { path = "../quantumsim-core" }
+negforge-core = { path = "../negforge-core" }
 pyo3 = { version = "0.22", features = ["extension-module"] }

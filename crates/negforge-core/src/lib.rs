@@ -1,4 +1,4 @@
-//! Rust port of the `quantumsim` 1D ballistic-MOSFET electrostatics + NEGF
+//! NEGForge: a Rust port of a 1D ballistic-MOSFET electrostatics + NEGF
 //! transport model (originally MATLAB, see `legacy_matlab/`).
 //!
 //! See the crate modules for the physics of each piece, and the top-level
@@ -15,7 +15,7 @@ pub mod sweep;
 mod tridiag;
 
 pub use device::{Device, DeviceParams};
-pub use error::{QuantumSimError, Result};
+pub use error::{NegForgeError, Result};
 pub use negf::GreenFunctionResult;
 pub use selfconsistent::{SelfConsistentOptions, SelfConsistentResult};
 pub use sweep::IvPoint;
