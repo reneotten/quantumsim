@@ -40,6 +40,17 @@
 //! quantization. See the top-level README's "Extending to a real 3D
 //! solver" section for what a genuine cross-section-resolved model would
 //! require.
+//!
+//! ## Charge-density units in the electrostatic solve
+//!
+//! Because the discrete Laplacian is built with `a` in nm, every term of
+//! `calc_potential`'s right-hand side is an energy per nm^2 (eV/nm^2). The
+//! charge term is `rho / (EPS_0 * k_si)`, and `EPS_0` is in SI units (F/m),
+//! so a charge density in C/m^3 would give V/m^2 there — off by 1e18 from the
+//! rest of the equation. [`Device::rho`] and [`DeviceParams::n_dot`] are
+//! therefore expressed in *model units*: an SI volume charge density scaled
+//! by [`RHO_SI_TO_MODEL`]. [`crate::selfconsistent`] does that conversion for
+//! the NEGF charge; anyone setting `rho`/`n_dot` by hand must do the same.
 
 use crate::constants::{E, EPS_0, H_BAR, K_B, M_E};
 use crate::tridiag;
@@ -74,6 +85,14 @@ impl GateGeometry {
         }
     }
 }
+
+/// Multiply an SI volume charge density (C/m^3) by this to get the model
+/// units [`Device::rho`] and [`DeviceParams::n_dot`] use.
+///
+/// The factor is `(1 nm / 1 m)^2 = 1e-18`, the same conversion that takes the
+/// electrostatic solve's `V/m^2` charge term into the `eV/nm^2` its Laplacian
+/// works in. See the module docs.
+pub const RHO_SI_TO_MODEL: f64 = 1e-18;
 
 /// Configuration for a [`Device`]. Field defaults match the original
 /// `quantumsim.m` `properties` block.
@@ -110,9 +129,17 @@ pub struct DeviceParams {
     /// Source/drain contact region length, nm. Only used verbatim when
     /// `auto_size_contacts` is `false`.
     pub l_ds: f64,
-    /// Fixed dopant charge term added to the mobile charge density in the
-    /// electrostatic solve.
+    /// Fixed dopant charge density added to the mobile charge density in the
+    /// electrostatic solve, in model units (SI C/m^3 times
+    /// [`RHO_SI_TO_MODEL`] — see the module docs).
     pub n_dot: f64,
+    /// Cross-sectional area of the conducting channel, nm^2. The transport
+    /// model is one-dimensional, so it yields a *linear* electron density;
+    /// turning that into the volume charge density the electrostatic solve
+    /// needs requires an area, and leaving it implicit is how a model quietly
+    /// acquires an arbitrary charge-density scale. `None` (the default) uses
+    /// `d_ch^2`, i.e. a square channel of the model's own body thickness.
+    pub cross_section_nm2: Option<f64>,
     /// Fermi-function tolerance used to bound the ballistic energy window.
     pub epsilon: f64,
     /// Source Fermi level, eV.
@@ -142,6 +169,7 @@ impl Default for DeviceParams {
             auto_size_contacts: true,
             l_ds: 40.0,
             n_dot: 0.0,
+            cross_section_nm2: None,
             epsilon: 10e-15,
             e_fs: 0.05,
             t: 300.0,
@@ -205,6 +233,9 @@ pub struct Device {
 
     /// Natural (screening) length, nm.
     pub lambda: f64,
+    /// Resolved channel cross-section, nm^2 (see
+    /// [`DeviceParams::cross_section_nm2`]).
+    pub cross_section_nm2: f64,
     /// Number of grid points along the channel.
     pub n: usize,
     /// Last grid index (0-based) belonging to the source region.
@@ -216,8 +247,9 @@ pub struct Device {
     pub psi_g: Vec<f64>,
     /// Built-in potential energy profile, eV.
     pub psi_bi: Vec<f64>,
-    /// Mobile charge density term entering the electrostatic solve. Zero
-    /// until a self-consistent (NEGF-fed) solve updates it.
+    /// Mobile charge density entering the electrostatic solve, in model units
+    /// (SI C/m^3 times [`RHO_SI_TO_MODEL`] — see the module docs). Zero until
+    /// a self-consistent (NEGF-fed) solve updates it.
     pub rho: Vec<f64>,
     /// Solved electrostatic potential energy profile, eV.
     pub psi_f: Vec<f64>,
@@ -274,6 +306,9 @@ impl Device {
         let mut device = Self {
             params,
             lambda,
+            cross_section_nm2: params
+                .cross_section_nm2
+                .unwrap_or(params.d_ch * params.d_ch),
             n,
             n_left,
             n_right,
@@ -398,12 +433,29 @@ impl Device {
         self.psi_0 = self.psi_f.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     }
 
-    /// Ballistic Landauer current for the current potential profile.
-    /// Mirrors `calc_current()`. Units match the original scaling
-    /// convention (see `legacy_matlab/README.md`).
+    /// Ballistic Landauer current for the current potential profile, in
+    /// **amperes** per conducting subband:
+    ///
+    /// ```text
+    /// I = (2e/h) * integral_{Psi_0}^{E_max} [f_s(E) - f_d(E)] dE
+    /// ```
+    ///
+    /// The factor 2 is spin degeneracy; the lower limit `Psi_0 = max(Psi_f)`
+    /// is the top of the barrier. This is the classic ballistic-MOSFET model:
+    /// transmission is assumed to be exactly 1 above the barrier and 0 below
+    /// it, so there is no tunneling and no quantum reflection. For the actual
+    /// transmission of the potential profile, use
+    /// [`crate::negf::negf_current`], which evaluates the Landauer integral
+    /// with the NEGF `T(E)` instead.
+    ///
+    /// The original MATLAB multiplied this by an unexplained `1e-3`, which is
+    /// dropped here: the formula above is the physical current, and the extra
+    /// factor only made absolute values wrong. Ratios and the subthreshold
+    /// swing (a log-slope) are unaffected by the change.
     pub fn calc_current(&self) -> f64 {
-        let f_s = |e: f64| 1.0 / (((e - self.params.e_fs) * E / (K_B * self.params.t)).exp() + 1.0);
-        let f_d = |e: f64| 1.0 / (((e - self.e_fd) * E / (K_B * self.params.t)).exp() + 1.0);
+        let thermal = K_B * self.params.t / E;
+        let f_s = |e: f64| 1.0 / (((e - self.params.e_fs) / thermal).exp() + 1.0);
+        let f_d = |e: f64| 1.0 / (((e - self.e_fd) / thermal).exp() + 1.0);
 
         let n_steps = ((self.e_max - self.psi_0) / self.params.d_e)
             .floor()
@@ -413,7 +465,8 @@ impl Device {
             let energy = self.psi_0 + k as f64 * self.params.d_e;
             sum += f_s(energy) - f_d(energy);
         }
-        2.0 * E / crate::constants::H * sum * self.params.d_e * E * 1e-3
+        // `sum * d_e` is in eV; the trailing `E` converts it to joules.
+        2.0 * E / crate::constants::H * sum * self.params.d_e * E
     }
 
     /// Set the drain-source bias.

@@ -21,7 +21,14 @@ use crate::selfconsistent::{self, SelfConsistentOptions};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IvPoint {
     pub voltage: f64,
+    /// Current in amperes, or `NaN` if this point's self-consistent solve
+    /// failed to converge (see [`IvPoint::converged`]).
     pub current: f64,
+    /// Whether this point's self-consistent solve converged. Always `true`
+    /// for a decoupled sweep. A single stubborn bias point shouldn't discard
+    /// an otherwise good sweep, so non-convergence is reported per point
+    /// rather than failing the whole call.
+    pub converged: bool,
 }
 
 /// If `Some`, each sweep point solves the full self-consistent Poisson<->NEGF
@@ -79,11 +86,24 @@ fn one_point(
     // iterates Poisson<->NEGF on top of it.
     set_bias(&mut dev, voltage);
     if let Some(opts) = self_consistency {
-        selfconsistent::solve_self_consistent(&mut dev, opts)?;
+        match selfconsistent::solve_self_consistent(&mut dev, opts) {
+            Ok(_) => {}
+            // A bias point that won't converge is a fact about that point,
+            // not a reason to throw away the rest of the sweep.
+            Err(NegForgeError::NotConverged { .. }) => {
+                return Ok(IvPoint {
+                    voltage,
+                    current: f64::NAN,
+                    converged: false,
+                })
+            }
+            Err(other) => return Err(other),
+        }
     }
     Ok(IvPoint {
         voltage,
         current: dev.calc_current(),
+        converged: true,
     })
 }
 
@@ -218,10 +238,17 @@ mod tests {
             IvPoint {
                 voltage: 0.0,
                 current: 0.0,
+                converged: true,
             },
             IvPoint {
                 voltage: 0.1,
                 current: 1e-9,
+                converged: true,
+            },
+            IvPoint {
+                voltage: 0.2,
+                current: f64::NAN,
+                converged: false,
             },
         ];
         let err = subthreshold_swing(&points, 0.0, 0.4).unwrap_err();

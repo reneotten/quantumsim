@@ -20,3 +20,10 @@ Notes on the original code, carried over into the rewrite's design notes
   together into a feedback loop in the original code (`calc_potential`
   always used `rho = 0`). The Rust rewrite adds that self-consistent loop;
   see the top-level README for details and caveats.
+- The rewrite does **not** treat this code as ground truth. Several pieces
+  of its physics are wrong and are corrected rather than reproduced: the
+  contact self-energy has the wrong sign of its imaginary part (giving a
+  partly-negative density of states), `calc_n` omits spin degeneracy and
+  uses an energy-independent Fermi weight with the wrong contact's band
+  edge, and `calc_current` carries an unexplained `1e-3` factor. Each
+  deviation is listed with its justification in the top-level README.

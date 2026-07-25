@@ -39,11 +39,13 @@ program. `negforge-py` is a thin binding layer on top of it.
   (`calc_potential`) and ballistic-current (`calc_current`) calculations,
   including the `GateGeometry`/`planar`/`fin_fet`/`nanoribbon` presets —
   see "Planar, FinFET and nanoribbon devices" below.
-- `negf` — the NEGF retarded Green's-function calculation, with two
-  interchangeable algorithms (`GreenFunctionAlgorithm::{Recursive,
-  Dense}`) and a parallel energy loop — see "Performance" below.
-- `charge` — NEGF-derived electron density, with two bug fixes relative to
-  the original `calc_n()` (see "Deviations from the original" below).
+- `negf` — the NEGF retarded Green's-function calculation: contact
+  self-energies, local density of states, Landauer-Caroli transmission and
+  the current derived from it, with two interchangeable algorithms
+  (`GreenFunctionAlgorithm::{Recursive, Dense}`), selectable outputs
+  (`GreenOutputs`) and a parallel energy loop — see "Performance" below.
+- `charge` — NEGF-derived electron density, with four corrections relative
+  to the original `calc_n()` (see "Deviations from the original" below).
 - `selfconsistent` — **new**: the Poisson&harr;NEGF self-consistency loop.
 - `sweep` — bias sweeps (`sweep_v_g`, `sweep_v_ds`) and subthreshold-swing
   extraction, mirroring `plot_Vg_I` / `plot_Vds_I` / `plot_S`. Each sweep
@@ -84,16 +86,32 @@ screened contact regions:
   geo)`. The electrostatic operator is tridiagonal with a reflective
   (Neumann-like) boundary condition at both ends, solved via the Thomas
   algorithm.
-- **Ballistic current**: the Landauer formula, `I = 2e/h * integral[f_s(E)
-  - f_d(E)] dE`, with Fermi-Dirac occupation of the source/drain
-  reservoirs.
+- **Ballistic current** (`calc_current`): the Landauer formula assuming
+  perfect transmission above the barrier top, `I = 2e/h *
+  integral[f_s(E) - f_d(E)] dE`, with Fermi-Dirac occupation of the
+  source/drain reservoirs. Returns amperes per conducting subband.
 - **NEGF**: a tight-binding discretization (on-site energy `2t + Psi_f(x)`,
-  hopping `-t`) with open-boundary self-energies at the two contacts,
-  giving the retarded Green's function, local density of states, and
-  (with the self-consistent extension) the charge density.
+  hopping `-t`) with retarded open-boundary self-energies `Sigma^r =
+  t*exp(-i k a)` at the two contacts, giving the retarded Green's
+  function, the local density of states, the charge density that closes
+  the self-consistent loop, and the Landauer-Caroli transmission
+  `T(E) = Gamma_s Gamma_d |G_{N-1,0}|^2`.
+- **NEGF current** (`calc_current_negf`): the same Landauer integral with
+  the *actual* `T(E)` instead of a step function, so it includes tunneling
+  through the barrier and quantum reflection above it. It agrees with the
+  ballistic formula to a few percent in the on-state and departs from it
+  in regimes where the analytic model's assumptions break down — notably
+  when a large `V_ds` pushes the conduction window past the discretized
+  band's finite width `4t` (0.68 eV at the default `a = 0.5 nm`; shrink
+  `a` to widen it).
 
 Units follow the original code throughout: lengths in nm, energies and
-potentials in eV, temperature in Kelvin.
+potentials in eV, temperature in Kelvin. Charge densities (`rho`,
+`N_dot`) are the one place that needs care: because the Laplacian is built
+in nm^-2, they are SI C/m^3 scaled by `RHO_SI_TO_MODEL` (1e-18). The
+self-consistent loop does that conversion, together with the division by
+`cross_section_nm2` that turns the 1D electron density into a volume
+density.
 
 ## Planar, FinFET and nanoribbon devices
 
@@ -180,11 +198,36 @@ existing architecture.
 
 ## Deviations from the original MATLAB code
 
-The user requested a faithful port plus closing the missing
-self-consistency loop, not a from-scratch physics redesign. Everything
-below is a deliberate, documented decision, not an accident:
+The original is a teaching code, not a reference implementation, and it is
+not treated as ground truth here: where its physics is wrong, this port
+fixes it and says so. Everything below is a deliberate, documented
+decision, not an accident:
 
-1. **Self-consistent Poisson&harr;NEGF loop** (`selfconsistent.rs`). The
+1. **Contact self-energy sign** (`negf.rs`) — the most consequential fix.
+   The original attaches `Sigma = +t*exp(+i k a)` at each contact, which has
+   `Im(Sigma) > 0`. A retarded self-energy must have `Im <= 0`; with the
+   original sign the contact term *subtracts* from the `+i*eta`
+   regularization instead of adding to it, and two things break:
+
+   - The Green's function ends up retarded on sites reached only by `eta`
+     and advanced on contact-coupled sites, so `Im(G_ii)` is not
+     sign-definite. Measured on the default device, **32% of the
+     "LDOS" entries came out negative** — a density of states cannot be
+     negative.
+   - Inside the self-consistent loop, where `eta` is comparable to
+     `t sin(ka)`, the two nearly cancel and `|G|^2` at the contacts is
+     inflated by **5-14x** (measured at the `eta` values the loop used),
+     distorting the charge density fed back into Poisson.
+
+   NEGForge uses `Sigma^r = t*exp(-i k a)`, so
+   `Im[(E + i*eta) I - H - Sigma^r]` is positive definite and the LDOS
+   (`-Im(G_ii) / (pi a)`) is positive by construction — asserted in both
+   unit and integration tests. The self-energy is also attached at every
+   energy rather than only inside the contact band; outside it, the
+   closed form is real, which is the correct evanescent level shift
+   (`Gamma = 0`) that the original dropped.
+
+2. **Self-consistent Poisson&harr;NEGF loop** (`selfconsistent.rs`). The
    original computed the electrostatic potential once with `rho = 0` and,
    separately, an NEGF charge density — but never fed one into the other.
    This is genuinely new: solve electrostatics, compute the NEGF electron
@@ -192,63 +235,96 @@ below is a deliberate, documented decision, not an accident:
    re-solve, iterate to convergence (or report a `NotConverged` error
    rather than silently returning garbage).
 
-2. **Charge-density unit fix** (needed for #1 to be numerically meaningful
-   at all). `calc_potential`'s RHS divides `rho + N_dot` by `EPS_0 *
-   k_si`, with `EPS_0` in SI units (F/m); for that division to land in the
-   same eV/nm^2 ballpark as the model's other terms, `rho` must be a
-   genuine volume charge density in C/m^3. The original never exercised
-   this since `rho` was always zero. The self-consistent loop converts the
-   NEGF electron density (computed in nm^-1, the model's native length
-   unit) to C/m^3 by treating the 1D chain as having an implicit unit (1
-   m^2) cross-section and multiplying by `-e`. Skipping this and feeding a
-   raw, differently-scaled density into `rho` was tried first and made the
-   fixed-point iteration diverge by many orders of magnitude — see the
-   module docs in `charge.rs` and `selfconsistent.rs` for the full
-   derivation.
+3. **Charge-density units and the device cross-section** (needed for #2 to
+   mean anything). Two separate conversions are involved, and both were
+   implicit before:
 
-3. **NEGF broadening (`eta`) inside the self-consistent loop.** The
-   original hardcoded `eta = 1e-8` for a one-off local-density-of-states
-   plot. That's fine for a static plot but not for a feedback loop: a
-   bound-state resonance whose energy happens to land within `eta` of an
-   energy-grid point produces a `|G|^2` spike orders of magnitude larger
-   than neighboring grid points, and feeding that grid-alignment-dependent
-   spike back into the electrostatic solve makes the iteration diverge or
-   oscillate. `SelfConsistentOptions::eta` defaults to `0.08` eV (tuned
-   empirically against the default device geometry — see `negf.rs` module
-   docs), large enough to resolve resonances smoothly across iterations.
-   The original's small `eta = 1e-8` is preserved as `negf::DEFAULT_ETA`
-   for the standalone, non-self-consistent `local_density_of_states` /
-   LDOS-plot path, where the original's sharp-peak behavior is what you
-   want to see.
+   - The electrostatic solve's Laplacian is built in nm^-2 while
+     `rho / (EPS_0 * k_si)` is in V/m^2, a factor of 1e18 apart. `rho` and
+     `N_dot` are therefore documented as SI C/m^3 scaled by
+     `RHO_SI_TO_MODEL`.
+   - The transport model is 1D and yields a *linear* density (nm^-1);
+     converting it to a volume density needs a channel cross-section.
+     `DeviceParams::cross_section_nm2` makes that explicit, defaulting to
+     `d_ch^2`.
 
-4. **Two `calc_n()` bug fixes** (`charge.rs`), needed for the
-   self-consistent charge density to respond to the actual physics rather
-   than being a constant:
+   Leaving the cross-section implicit — as the original scaling did — is
+   equivalent to assuming **1 nm^2**, which for the default geometry makes
+   the charge term the dominant contribution to the potential and, with the
+   sign fix in place, no longer converges at all. With the device's own
+   `d_ch^2 = 25 nm^2`, the charge term settles at roughly a third of the
+   gate/built-in term: a real but perturbative correction, which is what
+   self-consistency in this regime should look like.
+
+4. **Spin degeneracy in the charge density** (`charge.rs`). The original
+   includes the factor 2 for spin in the current (`2e/h`) but omits it in
+   `calc_n`, so the charge fed back into Poisson was a factor 2 light.
+   Both now use `g_s = 2`.
+
+5. **Two more `calc_n()` fixes** (`charge.rs`):
    - The original multiplies the whole energy sum by a single scalar
      `f(E_fs)` / `f(E_fd)` (evaluated once, outside the sum) instead of the
      energy-dependent Fermi occupation `f_s(E)` / `f_d(E)` used everywhere
-     else in the model (e.g. `calc_current`). Fixed to use the proper
-     per-energy weight.
-   - The original reuses one `mask = E > Psi_f(1)` (the *source* band
-     edge) for both the source and drain contact terms. Each contact's
-     contribution is now masked by its own band edge, consistent with how
-     `calc_green` already conditions each contact's self-energy on its own
-     band edge.
+     else in the model. Fixed to use the proper per-energy weight.
+   - The original reuses one `mask = E > Psi_f(1)` (the *source* band edge)
+     for both contact terms. Each contact's broadening now follows from its
+     own self-energy and vanishes outside its own band automatically, so no
+     mask is needed.
 
-5. **A choice of O(N) or O(N^3) NEGF, plus parallelism.** See
+6. **NEGF broadening (`eta`) inside the self-consistent loop.** `eta` is a
+   numerical-integration parameter: it only has to be large enough that a
+   resonance is resolved across several energy-grid points, otherwise the
+   charge estimate jumps around with grid alignment between iterations and
+   the fixed point never settles. It therefore scales with the energy step:
+   `SelfConsistentOptions::eta` defaults to `5 * d_e` (5 meV at the default
+   `d_e = 1 meV`), the smallest multiple that converges robustly across
+   device scales — `1 * d_e` does not converge. This is ~16x smaller than
+   the value the loop needed before the self-energy sign was fixed, which
+   is the point: that large `eta` was compensating for a bug. The
+   original's `eta = 1e-8` is kept as `negf::DEFAULT_ETA` for the
+   standalone LDOS and transmission paths, where sharp resonances are what
+   you want to see.
+
+7. **Landauer-Caroli current** (`negf::negf_current`, `calc_current_negf`
+   in Python) — new. The original computed a Green's function but never a
+   transmission, so the current was always the analytic `T(E) = 1`
+   approximation even when the NEGF machinery was running. Since
+   `T(E) = Gamma_s Gamma_d |G_{N-1,0}|^2` needs only the source column the
+   sweep already computes, the NEGF current comes essentially for free.
+   `calc_current` is kept as the analytic ballistic model rather than
+   replaced: it is a legitimate compact model, and the two disagree
+   precisely where each one's assumptions differ (see the discretization
+   caveat in the `negf_current` docs).
+
+8. **Unexplained `1e-3` in the current** (`device.rs`). The original
+   multiplies the Landauer integral by `1e-3` with no stated justification;
+   it made absolute currents wrong by three orders of magnitude. Dropped —
+   `calc_current` now returns amperes per subband. Ratios and the
+   subthreshold swing (a log-slope) are unaffected, so this changes no
+   qualitative result.
+
+9. **A choice of O(N) or O(N^3) NEGF, plus parallelism.** See
    "Performance" below. Purely an implementation/engineering addition
    (validated by cross-checking the two algorithms against each other in
    tests); the physics is unchanged.
 
-Everything else — the electrostatic operator, the ballistic current
-formula, the contact self-energy sign convention, the general unit
-handling (nm/eV/K) — is a direct, unmodified port. In particular, the
-model's overall dimensional consistency is inherited as-is from the
-original teaching code (e.g. the electrostatic equation isn't a fully
-rigorous SI-unit Poisson equation); this rewrite does not attempt to
-re-derive the model's physics from first principles, only to make it run,
-close its one clearly-missing feedback loop, and fix the bugs that stood
-in the way of that loop actually doing something.
+Everything else — the electrostatic operator and its reflective boundary
+condition, the `lambda` approximation, the region masks, the geometry, the
+nm/eV/K unit conventions — is a direct, unmodified port.
+
+### Known model limitations (inherited, not bugs)
+
+- The electrostatics is the original's 1D "natural length" approximation,
+  not a rigorous 2D/3D Poisson solve.
+- The tight-binding chain reproduces a parabolic band only near the band
+  bottom; its total width `4t` scales as `1/a^2`, so results that depend on
+  states near the band top are discretization-limited (see
+  `negf_current`'s docs).
+- `calc_current`'s ballistic approximation ignores band structure entirely,
+  which is why it and `calc_current_negf` diverge deep in subthreshold at
+  large `V_ds`.
+- The self-consistent loop uses simple linear mixing; it is not a Newton or
+  Anderson scheme, so strongly-coupled regimes may need a smaller `mixing`.
 
 ## Performance
 
@@ -261,7 +337,7 @@ string argument in Python:
 
 |                    | `Dense`                                             | `Recursive` (default)                                         |
 |--------------------|------------------------------------------------------|-----------------------------------------------------------------|
-| Method             | Build the full N×N complex matrix, invert it (Gauss-Jordan), read off the diagonal and two boundary columns — what the original MATLAB `inv()` call did. | Left-connected recursive Green's-function sweep (diagonal) + a direct tridiagonal solve (the two boundary columns). |
+| Method             | Build the full N×N complex matrix and eliminate on it — what the original MATLAB `inv()` call did. A full Gauss-Jordan inverse when the diagonal is wanted, otherwise the same elimination with just two right-hand sides. | Left-connected recursive Green's-function sweep (diagonal) + one shared tridiagonal factorization for both boundary columns. |
 | Cost per energy point | O(N^3) time, O(N^2) memory                        | O(N) time, O(N) memory                                          |
 | Why it exists      | Obviously correct: a direct definition-level matrix inversion, no tridiagonal-structure assumption, no recursion formula to get subtly wrong. Useful as a trusted reference (see tests) and as a fallback if the Hamiltonian ever gains longer-range hopping and stops being purely tridiagonal. | The one to use for anything performance-sensitive — the self-consistent loop and bias sweeps call this dozens to hundreds of times. |
 
@@ -273,11 +349,11 @@ Measured with `cargo run --release --example benchmark -p negforge-core`
 
 ```
      N      dense (s)  recursive (s)    speedup
-    21         0.0018         0.0002        10x
-    51         0.0144         0.0002        76x
-   101         0.1202         0.0003       395x
-   201         0.8849         0.0005      1889x
-   351         6.2474         0.0009      6611x
+    21         0.0020         0.0001        15x
+    51         0.0158         0.0002        74x
+   101         0.1170         0.0004       313x
+   201         0.9209         0.0007      1232x
+   351         5.9763         0.0010      5858x
 ```
 
 Dense scales cubically and recursive is essentially flat, as expected. At
@@ -297,10 +373,37 @@ opt-in needed. Measured on the same 4-core machine (Recursive, N=561, 900
 energy points, one sweep):
 
 ```
-1 thread:      0.0479 s
-all cores (4):  0.0169 s
-speedup:        2.8x-4.0x (varies by run/load)
+1 thread:      0.0422 s
+all cores (4):  0.0128 s
+speedup:        3.3x (varies by run/load)
 ```
+
+The sweep writes into flat, preallocated output buffers and each worker
+reuses one scratch workspace, so an energy point allocates nothing. The
+two boundary columns also share a single forward elimination instead of
+running two independent tridiagonal solves — bit-for-bit identical output
+(asserted in `tridiag::tests::boundary_columns_match_two_general_solves_exactly`),
+about 25% off the column work.
+
+### Computing only what the caller needs
+
+`GreenOutputs` controls whether a sweep evaluates the Green's-function
+diagonal at all. The self-consistent loop never reads it — the charge
+density needs only the boundary columns — so it asks for
+`GreenOutputs::BoundaryColumns` and skips both the diagonal recursion and
+its output array (4 MB per iteration at the default device size). Measured
+single-threaded at N=561, 900 energy points:
+
+```
+LDOS + columns (Full):                 0.0413 s
+columns only (self-consistent loop):   0.0304 s
+saving:                                1.36x
+```
+
+Against the pre-optimization implementation (0.0471 s for the same sweep),
+a self-consistent iteration's NEGF work is about 1.55x faster. Under
+`Dense` the saving is larger, since the alternative is a full N×N inverse
+rather than two right-hand sides.
 
 Bias sweeps (`sweep_v_g`/`sweep_v_ds`) are parallel too, at the *point*
 level rather than the energy level: `set_v_g`/`set_v_ds` reset a device's
@@ -313,11 +416,22 @@ input device's own state is left untouched, which also fixed a surprising
 side effect the earlier API had (a sweep silently leaving the device
 parked at its last bias point).
 
+A self-consistent bias sweep therefore nests one `rayon` parallel loop
+inside another. That is fine: rayon's work-stealing handles it, and
+forcing the inner energy loop to run serially when nested measured
+*slower* (2.85 s vs 2.58-2.64 s for a 21-point self-consistent sweep on 4
+cores), so the nesting is left alone.
+
 The one thing that is **not** parallelizable is the self-consistent loop's
 *iterations* — each iteration's charge depends on the previous iteration's
 potential, a genuine sequential dependency. Parallelism instead comes from
 within each iteration's NEGF sweep (above), which is where nearly all the
 time goes.
+
+Bias sweeps also report convergence per point: a bias point whose
+self-consistent solve fails comes back with a `NaN` current and
+`converged = false` (a `RuntimeWarning` in Python) instead of discarding
+the whole sweep.
 
 ### Using the switch
 
@@ -348,10 +462,18 @@ dev.sweep_v_g(0.0, 0.4, 0.05, self_consistent=True, algorithm="dense")
   algorithm on small systems, and of the two `GreenFunctionAlgorithm`
   variants against each other end-to-end (`negf.rs`) and through the full
   self-consistent loop (`selfconsistent.rs`).
+- Physics invariants are asserted rather than assumed: the contact
+  self-energy is retarded inside the band and decaying outside it, the LDOS
+  is positive everywhere (unit *and* default-scale integration tests), the
+  transmission stays within `0 <= T <= 1`, contact broadening vanishes
+  outside each contact's band, and skipping the Green's-function diagonal
+  leaves the boundary columns unchanged.
 - `crates/negforge-core/tests/self_consistent_realistic_device.rs` — an
   integration test at the model's default (non-toy) device scale,
   confirming the self-consistent loop converges and reproduces the
-  expected ballistic-MOSFET trend (current increasing with gate bias).
+  expected ballistic-MOSFET trend (current increasing with gate bias),
+  that the LDOS is positive there too, and that the NEGF and analytic
+  ballistic currents agree in the on-state.
 - `crates/negforge-core/tests/multigate_geometry.rs` — the
   planar/FinFET/nanoribbon physical sanity checks: natural-length
   ordering, all three architectures converging (decoupled and

@@ -7,7 +7,7 @@
 
 use std::time::Instant;
 
-use negforge_core::negf::{green_function_sweep, GreenFunctionAlgorithm};
+use negforge_core::negf::{green_function_sweep, GreenFunctionAlgorithm, GreenOutputs};
 use negforge_core::{Device, DeviceParams};
 
 fn device_with_n_sites(target_n: usize) -> Device {
@@ -28,11 +28,16 @@ fn device_with_n_sites(target_n: usize) -> Device {
     dev
 }
 
-fn time_sweep(device: &Device, n_energies: usize, algorithm: GreenFunctionAlgorithm) -> f64 {
+fn time_sweep(
+    device: &Device,
+    n_energies: usize,
+    algorithm: GreenFunctionAlgorithm,
+    outputs: GreenOutputs,
+) -> f64 {
     let e_min = device.psi_f.iter().cloned().fold(f64::INFINITY, f64::min);
     let energies: Vec<f64> = (0..n_energies).map(|k| e_min + k as f64 * 0.005).collect();
     let start = Instant::now();
-    let _ = green_function_sweep(device, &energies, 0.05, algorithm);
+    let _ = green_function_sweep(device, &energies, 0.005, algorithm, outputs);
     start.elapsed().as_secs_f64()
 }
 
@@ -48,8 +53,18 @@ fn main() {
     for &n in &[21usize, 51, 101, 201, 351] {
         let device = device_with_n_sites(n);
         let actual_n = device.n;
-        let dense_t = time_sweep(&device, N_ENERGIES, GreenFunctionAlgorithm::Dense);
-        let recursive_t = time_sweep(&device, N_ENERGIES, GreenFunctionAlgorithm::Recursive);
+        let dense_t = time_sweep(
+            &device,
+            N_ENERGIES,
+            GreenFunctionAlgorithm::Dense,
+            GreenOutputs::Full,
+        );
+        let recursive_t = time_sweep(
+            &device,
+            N_ENERGIES,
+            GreenFunctionAlgorithm::Recursive,
+            GreenOutputs::Full,
+        );
         println!(
             "{:>6} {:>14.4} {:>14.4} {:>9.0}x",
             actual_n,
@@ -78,14 +93,50 @@ fn main() {
         .num_threads(1)
         .build()
         .unwrap();
-    let serial_t =
-        serial_pool.install(|| time_sweep(&device, n_energies, GreenFunctionAlgorithm::Recursive));
+    let serial_t = serial_pool.install(|| {
+        time_sweep(
+            &device,
+            n_energies,
+            GreenFunctionAlgorithm::Recursive,
+            GreenOutputs::Full,
+        )
+    });
 
     // Default global pool: uses all available cores.
-    let parallel_t = time_sweep(&device, n_energies, GreenFunctionAlgorithm::Recursive);
+    let parallel_t = time_sweep(
+        &device,
+        n_energies,
+        GreenFunctionAlgorithm::Recursive,
+        GreenOutputs::Full,
+    );
 
     println!("available cores (per std::thread::available_parallelism): {cores}");
     println!("1 thread:            {serial_t:.4} s");
     println!("all cores ({cores}):        {parallel_t:.4} s");
     println!("speedup:             {:.2}x", serial_t / parallel_t);
+
+    println!();
+    println!(
+        "=== Output selection (Recursive, N={}, {n_energies} energy points, 1 thread) ===",
+        device.n
+    );
+    let full_t = serial_pool.install(|| {
+        time_sweep(
+            &device,
+            n_energies,
+            GreenFunctionAlgorithm::Recursive,
+            GreenOutputs::Full,
+        )
+    });
+    let columns_t = serial_pool.install(|| {
+        time_sweep(
+            &device,
+            n_energies,
+            GreenFunctionAlgorithm::Recursive,
+            GreenOutputs::BoundaryColumns,
+        )
+    });
+    println!("LDOS + columns (Full):        {full_t:.4} s");
+    println!("columns only (self-consistent loop): {columns_t:.4} s");
+    println!("saving:                       {:.2}x", full_t / columns_t);
 }
