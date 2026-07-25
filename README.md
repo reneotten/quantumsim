@@ -37,19 +37,15 @@ program. `negforge-py` is a thin binding layer on top of it.
   by both the electrostatics and NEGF modules.
 - `device` — device geometry/parameters and the electrostatic
   (`calc_potential`) and ballistic-current (`calc_current`) calculations.
-- `negf` — the NEGF retarded Green's-function calculation. Rather than the
-  original's dense O(N^3) matrix inversion (`inv()` in MATLAB, fine for a
-  one-off plot but too slow to call repeatedly in a self-consistent loop
-  or a bias sweep), this uses a left-connected recursive Green's-function
-  sweep (O(N)) for the diagonal (local density of states) and a direct
-  tridiagonal solve (O(N)) for each of the two contact-column quantities
-  needed for the charge density — both cross-checked against a dense
-  reference solver in the test suite.
+- `negf` — the NEGF retarded Green's-function calculation, with two
+  interchangeable algorithms (`GreenFunctionAlgorithm::{Recursive,
+  Dense}`) and a parallel energy loop — see "Performance" below.
 - `charge` — NEGF-derived electron density, with two bug fixes relative to
   the original `calc_n()` (see "Deviations from the original" below).
 - `selfconsistent` — **new**: the Poisson&harr;NEGF self-consistency loop.
 - `sweep` — bias sweeps (`sweep_v_g`, `sweep_v_ds`) and subthreshold-swing
-  extraction, mirroring `plot_Vg_I` / `plot_Vds_I` / `plot_S`.
+  extraction, mirroring `plot_Vg_I` / `plot_Vds_I` / `plot_S`. Each sweep
+  point runs in parallel (see "Performance").
 
 ## Building and running
 
@@ -154,8 +150,9 @@ below is a deliberate, documented decision, not an accident:
      `calc_green` already conditions each contact's self-energy on its own
      band edge.
 
-5. **O(N) NEGF instead of O(N^3).** See "Architecture" above. Purely a
-   performance change (validated against a dense reference solver in
+5. **A choice of O(N) or O(N^3) NEGF, plus parallelism.** See
+   "Performance" below. Purely an implementation/engineering addition
+   (validated by cross-checking the two algorithms against each other in
    tests); the physics is unchanged.
 
 Everything else — the electrostatic operator, the ballistic current
@@ -168,19 +165,113 @@ re-derive the model's physics from first principles, only to make it run,
 close its one clearly-missing feedback loop, and fix the bugs that stood
 in the way of that loop actually doing something.
 
+## Performance
+
+### Dense vs. recursive NEGF: the tradeoff
+
+Every NEGF quantity (local density of states, the injected charge used by
+the self-consistent loop) can be computed two ways, chosen via
+`GreenFunctionAlgorithm` in Rust or an `algorithm: "recursive" | "dense"`
+string argument in Python:
+
+|                    | `Dense`                                             | `Recursive` (default)                                         |
+|--------------------|------------------------------------------------------|-----------------------------------------------------------------|
+| Method             | Build the full N×N complex matrix, invert it (Gauss-Jordan), read off the diagonal and two boundary columns — what the original MATLAB `inv()` call did. | Left-connected recursive Green's-function sweep (diagonal) + a direct tridiagonal solve (the two boundary columns). |
+| Cost per energy point | O(N^3) time, O(N^2) memory                        | O(N) time, O(N) memory                                          |
+| Why it exists      | Obviously correct: a direct definition-level matrix inversion, no tridiagonal-structure assumption, no recursion formula to get subtly wrong. Useful as a trusted reference (see tests) and as a fallback if the Hamiltonian ever gains longer-range hopping and stops being purely tridiagonal. | The one to use for anything performance-sensitive — the self-consistent loop and bias sweeps call this dozens to hundreds of times. |
+
+Both are cross-checked against each other in
+`negf::tests::dense_and_recursive_algorithms_agree_end_to_end` and
+`selfconsistent::tests::dense_and_recursive_converge_to_the_same_potential`.
+Measured with `cargo run --release --example benchmark -p negforge-core`
+(single NEGF sweep, 100 energy points, on a 4-core machine):
+
+```
+     N      dense (s)  recursive (s)    speedup
+    21         0.0018         0.0002        10x
+    51         0.0144         0.0002        76x
+   101         0.1202         0.0003       395x
+   201         0.8849         0.0005      1889x
+   351         6.2474         0.0009      6611x
+```
+
+Dense scales cubically and recursive is essentially flat, as expected. At
+the model's default device size (N=561), a full self-consistent solve
+using `Dense` did not finish a single iteration in several minutes — it is
+not a realistic choice at that scale, only for small devices or
+cross-validation.
+
+### Parallelism
+
+Every energy point in a Green's-function sweep is an independent
+calculation (they only read the same fixed Hamiltonian), so the energy
+loop runs in parallel via `rayon`, spreading points across all available
+CPU cores automatically (respects `RAYON_NUM_THREADS` if you want to cap
+it). This applies to both algorithms and is the default — there's no
+opt-in needed. Measured on the same 4-core machine (Recursive, N=561, 900
+energy points, one sweep):
+
+```
+1 thread:      0.0479 s
+all cores (4):  0.0169 s
+speedup:        2.8x-4.0x (varies by run/load)
+```
+
+Bias sweeps (`sweep_v_g`/`sweep_v_ds`) are parallel too, at the *point*
+level rather than the energy level: `set_v_g`/`set_v_ds` reset a device's
+`psi_g`/`psi_bi`/`rho` from scratch (see `Device::init_vectors`), so
+nothing carries over between bias points — each one is evaluated on its
+own cloned `Device`, in parallel. This is why `sweep_v_g`/`sweep_v_ds` take
+`&Device` (a template whose bias is varied) rather than `&mut Device`: the
+input device's own state is left untouched, which also fixed a surprising
+side effect the earlier API had (a sweep silently leaving the device
+parked at its last bias point).
+
+The one thing that is **not** parallelizable is the self-consistent loop's
+*iterations* — each iteration's charge depends on the previous iteration's
+potential, a genuine sequential dependency. Parallelism instead comes from
+within each iteration's NEGF sweep (above), which is where nearly all the
+time goes.
+
+### Using the switch
+
+Rust:
+
+```rust
+use negforge_core::{GreenFunctionAlgorithm, SelfConsistentOptions};
+
+let opts = SelfConsistentOptions {
+    algorithm: GreenFunctionAlgorithm::Dense, // or ::Recursive (default)
+    ..Default::default()
+};
+```
+
+Python:
+
+```python
+dev.solve_self_consistent(algorithm="dense")   # or "recursive" (default)
+dev.local_density_of_states(algorithm="dense")
+dev.sweep_v_g(0.0, 0.4, 0.05, self_consistent=True, algorithm="dense")
+```
+
 ## Testing
 
 - `crates/negforge-core/src/*.rs` — unit tests per module, including
   cross-checks of the O(N) tridiagonal/recursive-Green's-function solvers
-  against dense (Gaussian-elimination / full-matrix-inversion) reference
-  implementations on small systems.
+  against the dense (Gaussian-elimination / full-matrix-inversion)
+  algorithm on small systems, and of the two `GreenFunctionAlgorithm`
+  variants against each other end-to-end (`negf.rs`) and through the full
+  self-consistent loop (`selfconsistent.rs`).
 - `crates/negforge-core/tests/self_consistent_realistic_device.rs` — an
   integration test at the model's default (non-toy) device scale,
   confirming the self-consistent loop converges and reproduces the
   expected ballistic-MOSFET trend (current increasing with gate bias).
+- `crates/negforge-core/examples/benchmark.rs` — the performance audit
+  behind the numbers quoted above; run it with `cargo run --release
+  --example benchmark -p negforge-core`.
 - `notebooks/negforge_demo.ipynb` has been executed end-to-end
-  (`jupyter nbconvert --execute`) to confirm the full frontend path works;
-  outputs are cleared before committing since they go stale the moment the
-  engine changes.
+  (`jupyter nbconvert --execute`) to confirm the full frontend path works,
+  including the dense-vs-recursive comparison cell; outputs are cleared
+  before committing since they go stale the moment the engine changes.
 
 Run everything with `cargo test --workspace`.

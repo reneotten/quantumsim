@@ -16,6 +16,6 @@ mod tridiag;
 
 pub use device::{Device, DeviceParams};
 pub use error::{NegForgeError, Result};
-pub use negf::GreenFunctionResult;
+pub use negf::{GreenFunctionAlgorithm, GreenFunctionResult};
 pub use selfconsistent::{SelfConsistentOptions, SelfConsistentResult};
 pub use sweep::IvPoint;

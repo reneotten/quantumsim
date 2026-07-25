@@ -3,13 +3,26 @@
 // no-op conversion in our code.
 #![allow(clippy::useless_conversion)]
 
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-use negforge_core::{Device, DeviceParams, SelfConsistentOptions};
+use negforge_core::{Device, DeviceParams, GreenFunctionAlgorithm, SelfConsistentOptions};
 
 fn to_py_err(e: negforge_core::NegForgeError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
+}
+
+/// Parse the Python-facing `algorithm` string ("recursive" or "dense") into
+/// a [`GreenFunctionAlgorithm`]. See `negforge_core::negf` module docs for
+/// the tradeoff between the two.
+fn parse_algorithm(algorithm: &str) -> PyResult<GreenFunctionAlgorithm> {
+    match algorithm {
+        "recursive" => Ok(GreenFunctionAlgorithm::Recursive),
+        "dense" => Ok(GreenFunctionAlgorithm::Dense),
+        other => Err(PyValueError::new_err(format!(
+            "unknown algorithm {other:?}, expected \"recursive\" or \"dense\""
+        ))),
+    }
 }
 
 /// Python-facing wrapper around [`negforge_core::Device`].
@@ -93,13 +106,14 @@ impl PyDevice {
         self.inner.set_l_ch(l);
     }
 
-    #[pyo3(signature = (max_iterations=50, tolerance=1e-6, mixing=0.3, eta=0.08))]
+    #[pyo3(signature = (max_iterations=50, tolerance=1e-6, mixing=0.3, eta=0.08, algorithm="recursive"))]
     fn solve_self_consistent(
         &mut self,
         max_iterations: usize,
         tolerance: f64,
         mixing: f64,
         eta: f64,
+        algorithm: &str,
     ) -> PyResult<(usize, f64)> {
         let opts = SelfConsistentOptions {
             max_iterations,
@@ -107,6 +121,7 @@ impl PyDevice {
             mixing,
             green_energy_fraction: 0.7,
             eta,
+            algorithm: parse_algorithm(algorithm)?,
         };
         let result = negforge_core::selfconsistent::solve_self_consistent(&mut self.inner, &opts)
             .map_err(to_py_err)?;
@@ -146,16 +161,24 @@ impl PyDevice {
             .collect()
     }
 
+    /// Sweep points run in parallel across CPU cores and don't mutate this
+    /// device (each point uses its own internal clone) — see
+    /// `negforge_core::sweep` module docs.
+    #[pyo3(signature = (v_min, v_max, step, self_consistent=false, algorithm="recursive"))]
     fn sweep_v_g(
-        &mut self,
+        &self,
         v_min: f64,
         v_max: f64,
         step: f64,
         self_consistent: bool,
+        algorithm: &str,
     ) -> PyResult<(Vec<f64>, Vec<f64>)> {
-        let opts = SelfConsistentOptions::default();
+        let opts = SelfConsistentOptions {
+            algorithm: parse_algorithm(algorithm)?,
+            ..Default::default()
+        };
         let sc = if self_consistent { Some(&opts) } else { None };
-        let points = negforge_core::sweep::sweep_v_g(&mut self.inner, v_min, v_max, step, sc)
+        let points = negforge_core::sweep::sweep_v_g(&self.inner, v_min, v_max, step, sc)
             .map_err(to_py_err)?;
         Ok((
             points.iter().map(|p| p.voltage).collect(),
@@ -163,16 +186,24 @@ impl PyDevice {
         ))
     }
 
+    /// Sweep points run in parallel across CPU cores and don't mutate this
+    /// device (each point uses its own internal clone) — see
+    /// `negforge_core::sweep` module docs.
+    #[pyo3(signature = (v_min, v_max, step, self_consistent=false, algorithm="recursive"))]
     fn sweep_v_ds(
-        &mut self,
+        &self,
         v_min: f64,
         v_max: f64,
         step: f64,
         self_consistent: bool,
+        algorithm: &str,
     ) -> PyResult<(Vec<f64>, Vec<f64>)> {
-        let opts = SelfConsistentOptions::default();
+        let opts = SelfConsistentOptions {
+            algorithm: parse_algorithm(algorithm)?,
+            ..Default::default()
+        };
         let sc = if self_consistent { Some(&opts) } else { None };
-        let points = negforge_core::sweep::sweep_v_ds(&mut self.inner, v_min, v_max, step, sc)
+        let points = negforge_core::sweep::sweep_v_ds(&self.inner, v_min, v_max, step, sc)
             .map_err(to_py_err)?;
         Ok((
             points.iter().map(|p| p.voltage).collect(),
@@ -182,8 +213,14 @@ impl PyDevice {
 
     /// Run the NEGF sweep at the device's current potential and return
     /// `(energies, ldos)` where `ldos[k]` is the local density of states
-    /// row (one value per grid site) at `energies[k]`.
-    fn local_density_of_states(&self) -> (Vec<f64>, Vec<Vec<f64>>) {
+    /// row (one value per grid site) at `energies[k]`. Energy points run
+    /// in parallel across CPU cores. `algorithm` is `"recursive"` (default,
+    /// O(N) per energy point) or `"dense"` (O(N^3), matching the original
+    /// MATLAB `inv()` — see `negforge_core::negf` module docs for why both
+    /// exist).
+    #[pyo3(signature = (algorithm="recursive"))]
+    fn local_density_of_states(&self, algorithm: &str) -> PyResult<(Vec<f64>, Vec<Vec<f64>>)> {
+        let algorithm = parse_algorithm(algorithm)?;
         let e_min = self
             .inner
             .psi_f
@@ -198,8 +235,9 @@ impl PyDevice {
             &self.inner,
             &energies,
             negforge_core::negf::DEFAULT_ETA,
+            algorithm,
         );
-        (result.energies, result.g_diag)
+        Ok((result.energies, result.g_diag))
     }
 }
 
