@@ -234,28 +234,41 @@ quantitative work such as feeding it into an NEGF Hamiltonian.
 ## 7. Where this fits in a full NEGF device simulation
 
 `φ_f` (or `Psi_f`) computed here is exactly the ingredient a Non-Equilibrium
-Green's Function transport solver needs as its potential energy term. The
-roadmap from here to a complete quantum transport simulation — following
-Datta, *Quantum Transport*, Chapters 8–10 — is:
+Green's Function transport solver needs as its potential energy term. This
+section originally sketched a *roadmap* from the electrostatics-only MATLAB
+scripts to a complete quantum transport simulation; that roadmap has since
+been implemented, in Rust, in `crates/negforge-core` — following Datta,
+*Quantum Transport*, Chapters 8–10:
 
 1. **Build the device Hamiltonian.** Discretize the transport direction the
    same way as here, and put `U_i = -e\,\phi_{f,i}` on the diagonal of a
    tight-binding-like Hamiltonian `H` (nearest-neighbor hopping `t₀` off
    the diagonal, from the effective mass and the same grid spacing `a`).
+   → `negf::green_function_sweep`'s `bulk_diag` (`crates/negforge-core/src/negf.rs`).
 2. **Add contact self-energies.** The source and drain are modeled as
    semi-infinite reservoirs in local equilibrium at Fermi levels `E_f` and
    `E_f - eV_ds`. Their effect on the finite device is captured by
    self-energy matrices `Σ_S(E)`, `Σ_D(E)` (computed e.g. via the surface
    Green's function / Sancho-Rubio recursion), which get added to `H` only
    at the boundary sites.
+   → the `sigma_l`/`sigma_r` terms in `negf::green_function_sweep` — but see
+   §8 below, this is the one place the implementation is known to diverge
+   from what this section describes.
 3. **Compute the retarded Green's function:**
    $$G^r(E) = \left[EI - H - \Sigma_S(E) - \Sigma_D(E)\right]^{-1}$$
+   → done via an O(N) recursive sweep + tridiagonal solves rather than a
+   dense matrix inverse (`negf::full_diagonal`, `tridiag::solve_complex`),
+   cross-checked against a dense reference solver in `negf.rs`'s tests.
 4. **Get transmission and current** via the broadening matrices
    `Γ_{S,D} = i(Σ_{S,D} - Σ_{S,D}^†)`:
    $$T(E) = \mathrm{Tr}\left[\Gamma_S(E)\,G^r(E)\,\Gamma_D(E)\,G^a(E)\right]$$
    $$I = \frac{2e}{h}\int T(E)\,\big[f_S(E) - f_D(E)\big]\,dE$$
    (Landauer–Büttiker formula; `f_S`, `f_D` are Fermi functions at the
    source/drain electrochemical potentials.)
+   → `device::Device::calc_current` implements this in its simplest limit:
+   rather than computing `T(E)` from the Green's function, it assumes
+   `T(E) = 1` for every state above the channel barrier top and `T(E) = 0`
+   below it (no scattering, no sub-barrier tunneling) — see §8.
 5. **Close the self-consistency loop.** The electron density implied by the
    NEGF solution (via the correlation function `G^<`) is fed back into
    `rho` in the Poisson solve implemented here, and steps 1–5 repeat until
@@ -263,8 +276,84 @@ Datta, *Quantum Transport*, Chapters 8–10 — is:
    turns the present linear electrostatics solve into a fully
    self-consistent Poisson–NEGF device simulator — the stated purpose of
    this repository.
+   → `selfconsistent::solve_self_consistent`, iterating
+   `device::Device::calc_potential` against
+   `charge::electron_density`.
 
 `N_dot` in `simulation.m` is the natural entry point for step 5's feedback:
-today it's a static placeholder for fixed dopant charge, but the same slot
-in the Poisson right-hand side is where the NEGF-computed mobile charge
-density would eventually be added on each iteration of the outer loop.
+in the Rust port it's `DeviceParams::n_dot`, still a static placeholder for
+fixed dopant charge, added alongside (not replaced by) the NEGF-computed
+mobile charge density that `selfconsistent::solve_self_consistent` now
+assigns to `rho` on each iteration of the outer loop.
+
+## 8. Validity and known limitations of the implemented NEGF / self-consistent loop
+
+The approximations below are documented in full, with derivations and (for
+the last one) regression tests, in the doc comments of the corresponding
+`crates/negforge-core/src` modules; this section is a summary for readers
+who came here for the physics rather than the code.
+
+- **Ballistic transport, no scattering.** `calc_current`'s `T(E) = 1` above
+  the barrier / `T(E) = 0` below it (step 4 above) is the "top-of-the
+  -barrier" thermionic-emission limit, not a general Landauer calculation
+  from the NEGF transmission function. It's a reasonable approximation only
+  when the channel is short compared to the carrier mean free path; it
+  overestimates on-current and underestimates subthreshold current
+  otherwise, since both scattering and sub-barrier tunneling are excluded
+  by construction. (`device.rs`)
+- **Effective-mass, single-valley, parabolic band.** `m_eff` (used for both
+  the ballistic hopping parameter and the NEGF tight-binding hopping `t`)
+  stands in for silicon's multiple equivalent conduction-band valleys and
+  its non-parabolic dispersion away from the band edge. Treat absolute
+  currents as illustrating trends, not as device-accurate predictions.
+  (`device.rs`)
+- **Tight-binding discretization range of validity.** The on-site/hopping
+  parameters reproduce the continuum parabolic dispersion `E = ħ²k²/2m*`
+  only for small `k·a`; the chain's actual dispersion is
+  `E = 2t(1 - cos(ka))`, bounded above by a bandwidth of `4t`. The grid
+  spacing `a` needs to be fine enough that the swept energy range (`psi_0`
+  to `e_max`) stays well below that bandwidth — worth checking via a
+  grid-refinement test before trusting results at a new device scale.
+  (`negf.rs`)
+- **Contact self-energy sign — a known, inherited issue, not introduced by
+  the Rust rewrite.** Step 2 above describes the textbook self-energy
+  `Σ_{S,D}(E)`; the actual formula ported from `quantumsim.m`'s
+  `calc_green()` (`sigma = t·exp(i·k·a)`) has the opposite sign from what a
+  causal, absorbing contact requires (a retarded self-energy needs
+  `Im(Σ) ≤ 0`, so that the broadening `Γ = -2·Im(Σ)` is non-negative; this
+  formula gives `Im(Σ) = t·sin(ka) > 0` for every propagating contact
+  mode). This is confirmed directly by a unit test
+  (`negf::tests::contact_self_energy_has_positive_imaginary_part_for_propagating_modes`),
+  and its consequence — the `g_diag` local-density-of-states proxy going
+  materially negative, not just noisy — is confirmed by another
+  (`negf::tests::g_diag_can_go_negative_at_self_consistent_loop_broadening`)
+  at the broadening actually used inside the self-consistent loop. The
+  quantity that actually feeds the electrostatic solve,
+  `charge::electron_density`, stays non-negative regardless — it's built
+  entirely from squared Green's-function magnitudes `|G|²`, which can't go
+  negative no matter the self-energy's sign — but its absolute magnitude
+  isn't verified against a correctly-signed reference calculation, and this
+  may well be why the self-consistent loop needs an empirically-tuned `eta`
+  far larger than a physical dephasing rate to converge (a large enough
+  artificial broadening keeps the *total* effective damping positive
+  despite the contacts contributing negative damping). This is flagged
+  rather than fixed because correcting it would change the self-consistent
+  loop's numerical behavior — see `negf.rs` for the full derivation.
+- **No explicit spin-degeneracy factor in the charge density.** Unlike
+  `calc_current`'s explicit `2e/h` (which does include spin degeneracy),
+  `charge::electron_density` has no analogous factor of two — carried over
+  unchanged from the original `calc_n`, which (before this rewrite closed
+  the feedback loop) was never actually exercised against any reference.
+  (`charge.rs`)
+- **Natural-length electrostatics** (§2 above) remains a thin-body
+  approximation and is also a *classical*, non-quantized transverse charge
+  model, in tension with the fully quantum-mechanical longitudinal NEGF
+  treatment described in this section — the overall model is a first-order
+  approximation, not a fully self-consistent 2D quantum simulation.
+
+None of the above are believed to affect the *qualitative* trends the test
+suite checks — current increasing with gate/drain bias, the self-consistent
+loop converging to a stable, non-negative charge density — but they mean
+absolute numbers from this model should be read as illustrating device
+physics concepts, not as quantitatively validated predictions for a real
+device.
