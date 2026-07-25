@@ -98,6 +98,57 @@ screened contact regions:
 Units follow the original code throughout: lengths in nm, energies and
 potentials in eV, temperature in Kelvin.
 
+### Validity of the model — read before trusting a number
+
+Each approximation below is documented in more detail (with the reasoning
+and, where relevant, a test demonstrating it) in the corresponding source
+module's doc comments.
+
+- **Natural-length electrostatics** (`device.rs`) assumes a thin body with a
+  parabolic transverse potential profile. Reasonable for thin-body/
+  double-gate/gate-all-around MOSFETs; not valid for bulk (thick-body)
+  devices. It is also a classical (non-quantized) transverse charge model,
+  in tension with the fully-quantized longitudinal NEGF treatment — this is
+  a first-order, not a fully self-consistent 2D, model.
+- **Ballistic Landauer current** (`device.rs`) assumes perfect transmission
+  above the channel barrier and zero below it: no scattering, no
+  sub-barrier tunneling. Good for short channels well below the carrier
+  mean free path; overestimates on-current and underestimates subthreshold
+  current otherwise.
+- **Effective-mass, single-valley, parabolic band** (`m_eff`, used for both
+  the ballistic hopping parameter and the NEGF tight-binding parameter):
+  real silicon has multiple equivalent valleys and a non-parabolic band
+  away from the edge; `m_eff` is a single fitting parameter standing in for
+  both, so absolute currents should be read as illustrative trends rather
+  than device-accurate predictions.
+- **Tight-binding NEGF discretization** (`negf.rs`) reproduces the continuum
+  parabolic dispersion only for grid spacings fine enough that the swept
+  energy range stays well below the chain's `4*t_hop` bandwidth; worth
+  checking via a grid-refinement test at new device scales.
+- **Contact self-energy sign — a known, inherited issue.** The self-energy
+  formula ported unchanged from the original MATLAB (`sigma = t_hop *
+  exp(i*k*a)`) has the opposite sign from what a causal/absorbing contact
+  requires (`Im(sigma) <= 0`); confirmed directly in `negf.rs`'s tests. The
+  quantity that actually feeds the self-consistent loop
+  (`charge::electron_density`) stays non-negative regardless, since it only
+  ever uses squared Green's-function magnitudes — but its absolute
+  magnitude, and any local-density-of-states values read from `g_diag`
+  (which *does* go visibly negative at the loop's broadening), are not
+  verified against a correctly-signed reference calculation. This is
+  flagged rather than silently fixed, since correcting it would change the
+  self-consistent loop's numerical behavior and is outside this rewrite's
+  "faithful port" scope — see `negf.rs` for the full analysis.
+- **No explicit spin-degeneracy factor** in the self-consistent charge
+  density (unlike `calc_current`'s explicit `2e/h`), carried over unchanged
+  from the original `calc_n`, which was never exercised against a
+  reference before this rewrite closed the feedback loop.
+
+None of the above are believed to affect the qualitative trends the test
+suite checks (current increasing with gate/drain bias, self-consistent
+convergence to a stable, non-negative charge density) — but they mean
+absolute numbers out of this model should be treated as illustrative of
+device physics concepts, not as device-accurate predictions.
+
 ## Deviations from the original MATLAB code
 
 This is a faithful port plus closing the missing self-consistency loop,

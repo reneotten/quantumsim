@@ -31,6 +31,30 @@
 //! (`selfconsistent.rs`) is responsible for converting to a proper volume
 //! charge density (m^-1 -> m^-3 assuming unit cross-section, times `-e`)
 //! before assigning it to `rho` — see that module's docs.
+//!
+//! ## Validity: normalization, sign, and open questions
+//!
+//! Every term summed into `n` is `(non-negative broadening) * (Fermi
+//! occupation in (0,1)) * |G|^2`, so `n(x) >= 0` always holds by
+//! construction — this does *not* depend on the contact self-energy sign
+//! question discussed in `negf.rs` (which affects `g_diag`, not the `|G|^2`
+//! columns used here).
+//!
+//! What *is* inherited from that sign question: `gamma_s`/`gamma_d` here
+//! use `+t_hop * sin(k)` together with a `1/pi` prefactor (rather than the
+//! more commonly quoted `Gamma = -2*Im(Sigma)` broadening with a `1/(2*pi)`
+//! prefactor); the two conventions happen to give the same magnitude
+//! (`t_hop*sin(k)/pi == (2*t_hop*sin(k))/(2*pi)`), so this reproduces the
+//! standard formula's *magnitude* even though the sign story behind
+//! `gamma_s`/`gamma_d` individually is the same non-causal one described in
+//! `negf.rs`. Also note there is no explicit spin-degeneracy factor of two
+//! here (unlike `calc_current`'s explicit `2*e/h`) — carried over unchanged
+//! from the original `calc_n`, which never had this checked against a
+//! reference since it was never fed back into anything before this rewrite.
+//! Treat absolute magnitudes of the self-consistent charge density as
+//! illustrative rather than quantitatively validated; the qualitative
+//! behavior (current increasing with gate/drain bias, convergence to a
+//! stable fixed point) is covered by the integration tests.
 
 use crate::constants::{E, K_B};
 use crate::negf::GreenFunctionResult;
