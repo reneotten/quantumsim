@@ -14,7 +14,7 @@ pub mod selfconsistent;
 pub mod sweep;
 mod tridiag;
 
-pub use device::{Device, DeviceParams};
+pub use device::{Device, DeviceParams, GateGeometry};
 pub use error::{NegForgeError, Result};
 pub use negf::{GreenFunctionAlgorithm, GreenFunctionResult};
 pub use selfconsistent::{SelfConsistentOptions, SelfConsistentResult};

@@ -64,6 +64,40 @@ class Device:
     def __repr__(self):
         return f"Device(n={self.n}, a={self.a} nm, screening_length={self.screening_length:.3f} nm)"
 
+    # -- architecture presets ------------------------------------------------
+    #
+    # `geo` (number of gates) is what actually distinguishes a planar,
+    # FinFET, or gate-all-around/nanoribbon device in this model's natural-
+    # length electrostatics (lambda ~ 1/sqrt(geo) -- more gates means
+    # tighter electrostatic control). These mirror the presets in
+    # `negforge_core::DeviceParams` (`planar`/`fin_fet`/`nanoribbon`); see
+    # the top-level README's "Planar, FinFET and nanoribbon devices"
+    # section for the physics and for why this ordering (planar worst,
+    # nanoribbon best short-channel behavior) is expected.
+
+    @classmethod
+    def planar(cls, **overrides) -> "Device":
+        """A planar, single-gate (bulk or SOI) MOSFET. Same defaults as
+        `Device()` -- planar/single-gate is this model's baseline."""
+        return cls(geo=1.0, **overrides)
+
+    @classmethod
+    def fin_fet(cls, **overrides) -> "Device":
+        """A double-gate FinFET: a thin fin (`d_ch` = fin width) gated on
+        both sidewalls, with a thinner oxide than the planar preset. Pass
+        `geo=3.0` to also gate the fin top (tri-gate)."""
+        params = {"geo": 2.0, "d_ch": 8.0, "d_ox": 1.5}
+        params.update(overrides)
+        return cls(**params)
+
+    @classmethod
+    def nanoribbon(cls, **overrides) -> "Device":
+        """A gate-all-around nanoribbon/nanowire FET: a narrow body
+        (`d_ch` = ribbon width/diameter) fully wrapped by the gate."""
+        params = {"geo": 4.0, "d_ch": 5.0, "d_ox": 1.0}
+        params.update(overrides)
+        return cls(**params)
+
     # -- electrostatics ----------------------------------------------------
 
     def calc_potential(self) -> "Device":
