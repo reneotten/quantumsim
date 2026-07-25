@@ -22,6 +22,7 @@ python/negforge/        Pythonic wrapper package (numpy arrays, keyword
                          device construction, IVCurve helper)
 notebooks/               Jupyter notebook frontend
 legacy_matlab/           Original MATLAB code, kept for reference
+docs/PHYSICS.md          Physics and implementation guide for legacy_matlab/
 ```
 
 `negforge-core` has no PyO3/Python dependency at all — it's a normal Rust
