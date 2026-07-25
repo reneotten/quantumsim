@@ -8,8 +8,16 @@ use pyo3::prelude::*;
 
 use negforge_core::{Device, DeviceParams, GreenFunctionAlgorithm, SelfConsistentOptions};
 
+/// Map a [`negforge_core::NegForgeError`] to the appropriate Python
+/// exception type: `InvalidParameter` (bad user input, e.g. a
+/// non-physical device geometry) becomes a `ValueError`, matching Python
+/// convention; everything else (currently just `NotConverged`, a runtime
+/// condition rather than a caller mistake) becomes a `RuntimeError`.
 fn to_py_err(e: negforge_core::NegForgeError) -> PyErr {
-    PyRuntimeError::new_err(e.to_string())
+    match e {
+        negforge_core::NegForgeError::InvalidParameter(_) => PyValueError::new_err(e.to_string()),
+        negforge_core::NegForgeError::NotConverged { .. } => PyRuntimeError::new_err(e.to_string()),
+    }
 }
 
 /// Parse the Python-facing `algorithm` string ("recursive" or "dense") into
@@ -59,7 +67,7 @@ impl PyDevice {
         e_fs: f64,
         t: f64,
         d_e: f64,
-    ) -> Self {
+    ) -> PyResult<Self> {
         let params = DeviceParams {
             a,
             e_f,
@@ -81,9 +89,9 @@ impl PyDevice {
             d_e,
             m_eff: 0.9 * negforge_core::constants::M_E,
         };
-        Self {
-            inner: Device::new(params),
-        }
+        Ok(Self {
+            inner: Device::try_new(params).map_err(to_py_err)?,
+        })
     }
 
     fn calc_potential(&mut self) {

@@ -15,9 +15,65 @@
 //! temperature in Kelvin. `Psi_g`/`Psi_bi`/`Psi_f` store *potential energy*
 //! (already in eV), not electrostatic potential in volts — consistent with
 //! `E_f`/`E_g` also being in eV.
+//!
+//! ## Planar, FinFET and nanoribbon devices
+//!
+//! `lambda = sqrt(k_si/k_ox * d_ch * d_ox / geo)` is the standard
+//! "generalized scale length" (natural length) model used throughout the
+//! multi-gate MOSFET literature (Auth & Plummer 1997; see also the
+//! Ferain/Colinge/Colinge review of multigate transistors). `geo` is the
+//! number of gates electrostatically controlling the channel, and is the
+//! one parameter that actually distinguishes a planar, FinFET, or
+//! gate-all-around (nanoribbon) architecture in this model — more gates
+//! means a smaller natural length, i.e. tighter electrostatic control and
+//! better short-channel-effect immunity, for the same body thickness. See
+//! [`GateGeometry`] and the `DeviceParams::planar`/`fin_fet`/`nanoribbon`
+//! constructors below, and
+//! `crates/negforge-core/tests/multigate_geometry.rs` for the physical
+//! sanity checks (natural length ordering, subthreshold swing improving
+//! with more gates).
+//!
+//! This is still a 1D model along the transport direction: `d_ch` is a
+//! single effective body-thickness number (fin width, film thickness, or
+//! ribbon diameter, depending on architecture) rather than an actual
+//! resolved cross-section, and there's no transverse-mode/subband
+//! quantization. See the top-level README's "Extending to a real 3D
+//! solver" section for what a genuine cross-section-resolved model would
+//! require.
 
 use crate::constants::{E, EPS_0, H_BAR, K_B, M_E};
 use crate::tridiag;
+
+/// Number of gates electrostatically controlling the channel, used to pick
+/// `DeviceParams::geo` for a given device architecture. See the module
+/// docs for the underlying scale-length model and its literature basis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateGeometry {
+    /// One gate (planar bulk MOSFET, or a single-gate SOI film).
+    SingleGate,
+    /// Two gates (planar double-gate SOI, or a FinFET with an inactive —
+    /// e.g. hard-mask-capped — fin top, so only the two sidewalls conduct).
+    DoubleGate,
+    /// Three active gates (a FinFET with an active top gate as well as
+    /// both sidewalls).
+    TriGate,
+    /// The gate fully wraps the channel (gate-all-around nanowire /
+    /// nanoribbon), idealized as a rectangular cross-section with all four
+    /// sides gated.
+    GateAllAround,
+}
+
+impl GateGeometry {
+    /// The `geo` (number-of-gates) factor for [`DeviceParams`].
+    pub fn geo_factor(self) -> f64 {
+        match self {
+            GateGeometry::SingleGate => 1.0,
+            GateGeometry::DoubleGate => 2.0,
+            GateGeometry::TriGate => 3.0,
+            GateGeometry::GateAllAround => 4.0,
+        }
+    }
+}
 
 /// Configuration for a [`Device`]. Field defaults match the original
 /// `quantumsim.m` `properties` block.
@@ -41,7 +97,9 @@ pub struct DeviceParams {
     pub k_si: f64,
     /// Relative permittivity of the oxide.
     pub k_ox: f64,
-    /// Gate geometry factor (number of gates).
+    /// Gate geometry factor (number of gates). See [`GateGeometry`] and
+    /// the module docs for how this distinguishes planar/FinFET/nanoribbon
+    /// architectures.
     pub geo: f64,
     /// Channel length, nm.
     pub l_ch: f64,
@@ -93,6 +151,52 @@ impl Default for DeviceParams {
     }
 }
 
+impl DeviceParams {
+    /// Set `geo` from a [`GateGeometry`], leaving every other field
+    /// unchanged. Note this only changes the *number of gates*; a real
+    /// FinFET or nanoribbon also has a much thinner body than a planar
+    /// device — see `fin_fet()`/`nanoribbon()` below for presets that set
+    /// realistic dimensions too.
+    pub fn with_gate_geometry(mut self, geometry: GateGeometry) -> Self {
+        self.geo = geometry.geo_factor();
+        self
+    }
+
+    /// Typical parameters for a planar, single-gate (bulk or SOI) MOSFET.
+    /// Identical to `Default::default()` — planar/single-gate is this
+    /// model's baseline architecture.
+    pub fn planar() -> Self {
+        Self::default().with_gate_geometry(GateGeometry::SingleGate)
+    }
+
+    /// Typical parameters for a double-gate FinFET: a thin fin (`d_ch` is
+    /// the fin width) with two active gates on the sidewalls (see
+    /// [`GateGeometry::DoubleGate`]; use
+    /// `.with_gate_geometry(GateGeometry::TriGate)` on the result if the
+    /// fin top is also gated) and a thin oxide, both narrower than the
+    /// planar preset for realistic electrostatic control.
+    pub fn fin_fet() -> Self {
+        Self {
+            d_ch: 8.0,
+            d_ox: 1.5,
+            ..Self::default()
+        }
+        .with_gate_geometry(GateGeometry::DoubleGate)
+    }
+
+    /// Typical parameters for a gate-all-around nanoribbon/nanowire FET:
+    /// a narrow body (`d_ch` is the ribbon width/diameter) fully wrapped
+    /// by the gate ([`GateGeometry::GateAllAround`]), with a thin oxide.
+    pub fn nanoribbon() -> Self {
+        Self {
+            d_ch: 5.0,
+            d_ox: 1.0,
+            ..Self::default()
+        }
+        .with_gate_geometry(GateGeometry::GateAllAround)
+    }
+}
+
 /// A 1D ballistic-MOSFET device: geometry, electrostatics and derived
 /// transport quantities.
 #[derive(Debug, Clone)]
@@ -133,7 +237,30 @@ impl Device {
     /// constructor: `lambda` is computed first, then (if
     /// `auto_size_contacts`) `l_ds` is overwritten from it before the grid
     /// is sized.
-    pub fn new(mut params: DeviceParams) -> Self {
+    ///
+    /// # Panics
+    ///
+    /// Panics if `params` fails [`Self::try_new`]'s validation — see
+    /// there for what that covers. Use `try_new` instead if you're
+    /// constructing a device from values you don't already trust (e.g.
+    /// user-supplied parameters).
+    pub fn new(params: DeviceParams) -> Self {
+        Self::try_new(params).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Fallible version of [`Self::new`]. Returns
+    /// `Err(NegForgeError::InvalidParameter)` if any of the
+    /// geometry/material parameters that the electrostatic solve divides
+    /// by (`geo`, `d_ch`, `d_ox`, `k_si`, `k_ox`, `a`) or the grid sizing
+    /// (`l_ch`, and `l_ds` when `auto_size_contacts` is `false`) are
+    /// non-positive or non-finite. Silently letting one of these through
+    /// would produce an infinite or NaN natural length and propagate
+    /// garbage through the rest of the solve instead of failing at the
+    /// point of misconfiguration — a real risk once `geo` is something a
+    /// caller sets explicitly (e.g. via [`GateGeometry`]) rather than only
+    /// ever the hardcoded default.
+    pub fn try_new(mut params: DeviceParams) -> crate::error::Result<Self> {
+        Self::validate_params(&params)?;
         let lambda = Self::compute_lambda(&params);
         if params.auto_size_contacts {
             params.l_ds = (lambda.floor()) * 15.0;
@@ -160,7 +287,34 @@ impl Device {
             t_hop,
         };
         device.init_vectors();
-        device
+        Ok(device)
+    }
+
+    fn validate_params(params: &DeviceParams) -> crate::error::Result<()> {
+        let positive = [
+            ("geo", params.geo),
+            ("d_ch", params.d_ch),
+            ("d_ox", params.d_ox),
+            ("k_si", params.k_si),
+            ("k_ox", params.k_ox),
+            ("a", params.a),
+            ("l_ch", params.l_ch),
+        ];
+        for (name, value) in positive {
+            if !(value.is_finite() && value > 0.0) {
+                return Err(crate::error::NegForgeError::InvalidParameter(format!(
+                    "{name} must be finite and positive, got {value}"
+                )));
+            }
+        }
+        let l_ds_ok = params.l_ds.is_finite() && params.l_ds > 0.0;
+        if !params.auto_size_contacts && !l_ds_ok {
+            return Err(crate::error::NegForgeError::InvalidParameter(format!(
+                "l_ds must be finite and positive when auto_size_contacts is false, got {}",
+                params.l_ds
+            )));
+        }
+        Ok(())
     }
 
     fn compute_lambda(params: &DeviceParams) -> f64 {
@@ -339,5 +493,23 @@ mod tests {
             i1 > i0,
             "current should increase with gate bias: {i0} -> {i1}"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "geo")]
+    fn rejects_zero_geo() {
+        Device::new(DeviceParams {
+            geo: 0.0,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "d_ch")]
+    fn rejects_negative_d_ch() {
+        Device::new(DeviceParams {
+            d_ch: -1.0,
+            ..Default::default()
+        });
     }
 }

@@ -36,7 +36,9 @@ program. `negforge-py` is a thin binding layer on top of it.
 - `tridiag` — real and complex Thomas-algorithm tridiagonal solvers, used
   by both the electrostatics and NEGF modules.
 - `device` — device geometry/parameters and the electrostatic
-  (`calc_potential`) and ballistic-current (`calc_current`) calculations.
+  (`calc_potential`) and ballistic-current (`calc_current`) calculations,
+  including the `GateGeometry`/`planar`/`fin_fet`/`nanoribbon` presets —
+  see "Planar, FinFET and nanoribbon devices" below.
 - `negf` — the NEGF retarded Green's-function calculation, with two
   interchangeable algorithms (`GreenFunctionAlgorithm::{Recursive,
   Dense}`) and a parallel energy loop — see "Performance" below.
@@ -92,6 +94,89 @@ screened contact regions:
 
 Units follow the original code throughout: lengths in nm, energies and
 potentials in eV, temperature in Kelvin.
+
+## Planar, FinFET and nanoribbon devices
+
+`geo` in the natural-length formula above (`lambda = sqrt(k_si/k_ox *
+d_ch * d_ox / geo)`) is the number of gates electrostatically controlling
+the channel — the "generalized scale length" model from the multi-gate
+MOSFET literature (Auth & Plummer 1997). It's the one parameter that
+actually distinguishes device architectures in this 1D model: more gates
+gives a smaller natural length, i.e. tighter electrostatic control and
+better short-channel-effect immunity, for the same body thickness.
+[`GateGeometry`] enumerates the standard cases (`SingleGate`=1,
+`DoubleGate`=2, `TriGate`=3, `GateAllAround`=4), and `DeviceParams` has
+matching presets with realistic body/oxide dimensions:
+
+| Preset (Rust `DeviceParams::`, Python `negforge.Device.`) | Architecture | `geo` | Notes |
+|---|---|---|---|
+| `planar()` | Planar bulk/SOI MOSFET | 1 | Same as `default()` |
+| `fin_fet()` | Double-gate FinFET | 2 | Thin fin (`d_ch` = fin width), sidewall gates only; `.with_gate_geometry(GateGeometry::TriGate)` if the fin top is also gated |
+| `nanoribbon()` | Gate-all-around nanoribbon/nanowire | 4 | Narrow body (`d_ch` = ribbon width/diameter), gate wraps all sides |
+
+This reproduces the textbook result
+(`crates/negforge-core/examples/geometry_comparison.rs`, cross-checked in
+`crates/negforge-core/tests/multigate_geometry.rs`): at a channel length
+short enough for the planar device to show real short-channel-effect
+degradation, FinFET and especially gate-all-around do much better —
+subthreshold swing at `l_ch = 10 nm` (ideal thermal limit at 300 K is
+59.6 mV/decade):
+
+```
+planar      lambda= 8.473 nm   S= 147.3 mV/decade
+fin_fet     lambda= 4.151 nm   S=  86.4 mV/decade
+nanoribbon  lambda= 1.895 nm   S=  64.3 mV/decade
+```
+
+All three architectures also run through the full self-consistent
+Poisson&harr;NEGF loop and both NEGF algorithms without issue — see the
+test file above.
+
+**What this is not**: `d_ch` here is a single effective body-thickness
+number, not an actually-resolved cross-section — there's no transverse-
+mode/subband quantization, so it can't capture, say, the difference
+between a wide-and-thin FinFET fin and a narrow-and-thick one with the
+same `geo` and cross-sectional area, or volume-inversion effects specific
+to very narrow gate-all-around wires. Modeling that requires resolving the
+cross-section, which is what a real 3D (or mode-space) extension would
+add — see below.
+
+## Extending to a real 3D solver
+
+Nothing here — every geometry preset above still uses the same 1D
+natural-length electrostatics and 1D NEGF transport. A genuine 3D (or
+"mode-space", the standard middle ground) solver is a substantially
+different piece of software, not an incremental change to this one, and
+wasn't built as part of this pass. Rough shape of what it would take, for
+context if this becomes a real ask later:
+
+1. **Mode-space NEGF** (the tractable approach real nanoscale-FET
+   simulators use, e.g. nanoMOS/OMEN/NEMO — as opposed to full real-space
+   3D NEGF, which is a research-grade undertaking on its own): at each
+   slice along the transport direction, solve a 2D (FinFET) or
+   cross-sectional Schrodinger equation for the transverse confinement
+   eigenvalues (subbands) and eigenvectors, given the local potential.
+2. Run this crate's existing 1D NEGF machinery once per subband, using
+   each subband's confinement energy as an added effective potential
+   floor, and sum the resulting charge/current across subbands.
+3. Couple that to a 2D or 3D Poisson solve (cross-section x length, or a
+   full 3D mesh) instead of the current 1D natural-length formula, and
+   iterate to self-consistency the same way `selfconsistent.rs` already
+   does for the 1D case.
+4. None of the current O(N) tridiagonal tricks carry over directly — the
+   Poisson operator is no longer tridiagonal in 2D/3D (a sparse
+   iterative solver, e.g. conjugate gradient, would replace the Thomas
+   algorithm), and the NEGF energy-loop parallelism generalizes but now
+   has a subband dimension to parallelize over too.
+
+This is weeks-to-months of numerical-methods and validation work, not a
+follow-on patch, and getting it subtly wrong (e.g. a sign error in the
+subband coupling) is easy to do and hard to notice without a trusted 2D/3D
+reference to check against — unlike the 1D engine here, which could be
+(and was) validated by cross-checking algorithms against each other and
+against known physical trends. If this is wanted, it's worth scoping and
+staffing as its own effort rather than folding into this codebase's
+existing architecture.
 
 ## Deviations from the original MATLAB code
 
@@ -266,9 +351,18 @@ dev.sweep_v_g(0.0, 0.4, 0.05, self_consistent=True, algorithm="dense")
   integration test at the model's default (non-toy) device scale,
   confirming the self-consistent loop converges and reproduces the
   expected ballistic-MOSFET trend (current increasing with gate bias).
+- `crates/negforge-core/tests/multigate_geometry.rs` — the
+  planar/FinFET/nanoribbon physical sanity checks: natural-length
+  ordering, all three architectures converging (decoupled and
+  self-consistent), and subthreshold swing improving with more gates at a
+  short channel length.
 - `crates/negforge-core/examples/benchmark.rs` — the performance audit
   behind the numbers quoted above; run it with `cargo run --release
   --example benchmark -p negforge-core`.
+- `crates/negforge-core/examples/geometry_comparison.rs` — the
+  planar/FinFET/nanoribbon subthreshold-swing comparison quoted above; run
+  it with `cargo run --release --example geometry_comparison -p
+  negforge-core`.
 - `notebooks/negforge_demo.ipynb` has been executed end-to-end
   (`jupyter nbconvert --execute`) to confirm the full frontend path works,
   including the dense-vs-recursive comparison cell; outputs are cleared
