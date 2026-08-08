@@ -132,14 +132,29 @@ class Device:
         """Natural (screening) length lambda, nm."""
         return self._inner.screening_length
 
-    def local_density_of_states(self):
+    def local_density_of_states(self, eta: float | None = None, d_e: float | None = None):
         """NEGF sweep at the device's current potential.
 
-        Returns `(energies, ldos)` where `ldos[k]` is the local density of
-        states across all grid sites at `energies[k]`. Matches
-        `calc_green()`'s `G_r_diag` in the original code.
+        Returns `(energies, ldos)` where `energies` has shape `(nE,)` (eV) and
+        `ldos` has shape `(nE, n)` — one row of grid-site values per energy.
+        Matches `calc_green()`'s `G_r_diag` in the original code.
+
+        Parameters
+        ----------
+        eta:
+            Imaginary broadening of the retarded Green's function, in eV.
+            Defaults to the Rust `negf::DEFAULT_ETA` (`1e-8`), reproducing the
+            original MATLAB behaviour. Because that is far below the energy
+            grid spacing `d_e` (1 meV by default), resonances land between grid
+            points and the result is a handful of isolated spikes — a log-scale
+            map made from it looks essentially empty. For a smooth, plottable
+            LDOS use a few times `d_e`, e.g. `eta=5e-3`. The self-consistent
+            loop separately defaults to `eta=0.08` eV for the same reason.
+        d_e:
+            Energy grid spacing for this sweep only, in eV. Defaults to
+            `DeviceParams::d_e` (1 meV).
         """
-        energies, ldos = self._inner.local_density_of_states()
+        energies, ldos = self._inner.local_density_of_states(eta, d_e)
         return np.asarray(energies), np.asarray(ldos)
 
     def sweep_v_g(self, v_min: float, v_max: float, step: float, self_consistent: bool = False) -> IVCurve:

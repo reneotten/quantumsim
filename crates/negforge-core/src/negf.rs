@@ -370,6 +370,60 @@ mod tests {
         }
     }
 
+    /// Larger `eta` must produce a smoother, better-resolved spectrum on a
+    /// fixed energy grid. This is the property the Python `eta` argument on
+    /// `local_density_of_states()` exists to expose: at the historical
+    /// `DEFAULT_ETA` (1e-8 eV) the Lorentzian width is ~10^5 times narrower
+    /// than a typical 1 meV grid step, so resonances fall between grid points
+    /// and the sampled LDOS is a sparse set of spikes rather than a spectrum.
+    #[test]
+    fn larger_eta_resolves_more_of_the_spectrum_on_a_fixed_grid() {
+        let mut device = Device::new(DeviceParams {
+            a: 1.0,
+            l_ch: 10.0,
+            l_ds: 10.0,
+            auto_size_contacts: false,
+            v_g: 0.3,
+            ..Default::default()
+        });
+        device.calc_potential();
+
+        let e_min = device.psi_f.iter().cloned().fold(f64::INFINITY, f64::min);
+        let energies: Vec<f64> = (0..400).map(|i| e_min + i as f64 * 0.001).collect();
+
+        // Fraction of (energy, site) samples carrying non-negligible weight.
+        let occupancy = |eta: f64| -> f64 {
+            let result = green_function_sweep(&device, &energies, eta);
+            let max = result
+                .g_diag
+                .iter()
+                .flat_map(|row| row.iter())
+                .fold(0.0f64, |acc, v| acc.max(v.abs()));
+            assert!(max > 0.0, "sweep produced an all-zero LDOS");
+            let total: usize = result.g_diag.iter().map(|row| row.len()).sum();
+            let filled = result
+                .g_diag
+                .iter()
+                .flat_map(|row| row.iter())
+                .filter(|v| v.abs() > max * 1e-6)
+                .count();
+            filled as f64 / total as f64
+        };
+
+        let sharp = occupancy(DEFAULT_ETA);
+        let broadened = occupancy(5e-3);
+
+        assert!(
+            broadened > sharp,
+            "broadening should resolve more of the spectrum: \
+             sharp(eta={DEFAULT_ETA:e})={sharp:.4}, broadened(eta=5e-3)={broadened:.4}"
+        );
+        assert!(
+            broadened > 0.5,
+            "eta a few times the grid step should fill most of the map, got {broadened:.4}"
+        );
+    }
+
     /// Documents the corrected sign claim from the module docs' "Contact
     /// self-energies" section: for the branch of `ka_s`/`ka_d` this module
     /// actually computes (`ka in (0, pi)`, the reflected branch), the

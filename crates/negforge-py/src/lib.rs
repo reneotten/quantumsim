@@ -183,7 +183,38 @@ impl PyDevice {
     /// Run the NEGF sweep at the device's current potential and return
     /// `(energies, ldos)` where `ldos[k]` is the local density of states
     /// row (one value per grid site) at `energies[k]`.
-    fn local_density_of_states(&self) -> (Vec<f64>, Vec<Vec<f64>>) {
+    ///
+    /// `eta` is the imaginary broadening added to the energy argument of the
+    /// retarded Green's function, in eV. It defaults to
+    /// [`negforge_core::negf::DEFAULT_ETA`] (`1e-8`), which reproduces the
+    /// original MATLAB code's sharp-resonance behaviour. That value is far
+    /// smaller than the energy grid spacing `d_e` (1 meV by default), so
+    /// resonances are effectively sampled at random and the result is a set of
+    /// isolated spikes rather than a smooth spectrum — fine for reproducing the
+    /// original plot, but poor for visualisation or integration. Pass a value
+    /// of order a few times `d_e` (e.g. `5e-3`) for a smooth, resolvable LDOS
+    /// map.
+    ///
+    /// `d_e` overrides the device's energy grid spacing (eV) for this sweep
+    /// only; `None` uses `DeviceParams::d_e`.
+    #[pyo3(signature = (eta=None, d_e=None))]
+    fn local_density_of_states(
+        &self,
+        eta: Option<f64>,
+        d_e: Option<f64>,
+    ) -> PyResult<(Vec<f64>, Vec<Vec<f64>>)> {
+        let eta = eta.unwrap_or(negforge_core::negf::DEFAULT_ETA);
+        if !(eta > 0.0) || !eta.is_finite() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "eta must be a finite, strictly positive broadening in eV",
+            ));
+        }
+        let d_e = d_e.unwrap_or(self.inner.params.d_e);
+        if !(d_e > 0.0) || !d_e.is_finite() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "d_e must be a finite, strictly positive energy step in eV",
+            ));
+        }
         let e_min = self
             .inner
             .psi_f
@@ -191,15 +222,10 @@ impl PyDevice {
             .cloned()
             .fold(f64::INFINITY, f64::min);
         let e_max = 0.7 * self.inner.e_max;
-        let d_e = self.inner.params.d_e;
         let steps = ((e_max - e_min) / d_e).floor().max(0.0) as usize;
         let energies: Vec<f64> = (0..=steps).map(|k| e_min + k as f64 * d_e).collect();
-        let result = negforge_core::negf::green_function_sweep(
-            &self.inner,
-            &energies,
-            negforge_core::negf::DEFAULT_ETA,
-        );
-        (result.energies, result.g_diag)
+        let result = negforge_core::negf::green_function_sweep(&self.inner, &energies, eta);
+        Ok((result.energies, result.g_diag))
     }
 }
 
