@@ -14,8 +14,9 @@ from __future__ import annotations
 import numpy as np
 
 from ._negforge import Device as _RustDevice
+from ._negforge import M_E
 
-__all__ = ["Device", "IVCurve"]
+__all__ = ["Device", "IVCurve", "M_E"]
 
 
 class IVCurve:
@@ -55,6 +56,22 @@ class Device:
         dev = negforge.Device(v_ds=0.3, v_g=0.2, l_ch=40.0)
         dev.solve_self_consistent()
         current = dev.calc_current()
+
+    Note that `m_eff` is an absolute mass **in kilograms**, not a ratio to
+    the free-electron mass. Use the exported `negforge.M_E` to spell it::
+
+        dev = negforge.Device(m_eff=0.19 * negforge.M_E)   # Si transverse mass
+
+    Values large enough to be an obvious unit mix-up (e.g. `m_eff=0.19`)
+    raise `ValueError` rather than silently simulating an absurdly heavy
+    carrier.
+
+    Be aware that `m_eff` only enters the NEGF tight-binding hopping
+    `t_hop = hbar^2 / (2 m_eff a^2)`, so it changes `local_density_of_states()`
+    and the self-consistent charge, but **not** `calc_current()`: the ballistic
+    Landauer integral in this model assumes unit transmission above the barrier
+    and carries no mass prefactor. Changing `m_eff` alone therefore leaves the
+    ballistic I-V untouched by construction.
     """
 
     def __init__(self, **kwargs):

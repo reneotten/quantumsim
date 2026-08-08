@@ -24,7 +24,8 @@ impl PyDevice {
     #[pyo3(signature = (
         a=0.5, e_f=0.15, e_g=1.0, v_ds=0.0, v_g=0.0, d_ox=5.0, d_ch=5.0,
         k_si=11.2, k_ox=3.9, geo=1.0, l_ch=40.0, auto_size_contacts=true,
-        l_ds=40.0, n_dot=0.0, epsilon=10e-15, e_fs=0.05, t=300.0, d_e=0.001
+        l_ds=40.0, n_dot=0.0, epsilon=10e-15, e_fs=0.05, t=300.0, d_e=0.001,
+        m_eff=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -46,7 +47,26 @@ impl PyDevice {
         e_fs: f64,
         t: f64,
         d_e: f64,
-    ) -> Self {
+        m_eff: Option<f64>,
+    ) -> PyResult<Self> {
+        let m_eff = m_eff.unwrap_or(0.9 * negforge_core::constants::M_E);
+        // `m_eff` is an absolute mass in kg, not a ratio to the electron mass.
+        // Passing e.g. `m_eff=0.9` (meaning "0.9 m_e") would otherwise be
+        // accepted silently and be ~10^30 times too heavy, so reject values
+        // that cannot be a real effective mass and say how to spell it.
+        if !m_eff.is_finite() || m_eff <= 0.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "m_eff must be a finite, strictly positive mass in kg",
+            ));
+        }
+        if m_eff > 1e-25 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "m_eff is given in kilograms, not in units of the electron mass \
+                 (got {m_eff:e} kg). For 0.9 m_e write m_eff=0.9 * negforge.M_E \
+                 (= {:.4e} kg).",
+                0.9 * negforge_core::constants::M_E
+            )));
+        }
         let params = DeviceParams {
             a,
             e_f,
@@ -66,11 +86,11 @@ impl PyDevice {
             e_fs,
             t,
             d_e,
-            m_eff: 0.9 * negforge_core::constants::M_E,
+            m_eff,
         };
-        Self {
+        Ok(Self {
             inner: Device::new(params),
-        }
+        })
     }
 
     fn calc_potential(&mut self) {
@@ -206,5 +226,8 @@ impl PyDevice {
 #[pymodule]
 fn _negforge(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDevice>()?;
+    // Exported so Python callers can spell effective masses relative to the
+    // free-electron mass, e.g. `Device(m_eff=0.19 * negforge.M_E)`.
+    m.add("M_E", negforge_core::constants::M_E)?;
     Ok(())
 }
