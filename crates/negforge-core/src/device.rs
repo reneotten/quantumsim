@@ -316,6 +316,39 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
+    /// `m_eff` sets the tight-binding hopping `t_hop = hbar^2/(2 m_eff a^2)`,
+    /// so a lighter carrier must raise `t_hop`. It deliberately does *not*
+    /// affect `calc_current`, whose Landauer integral assumes unit
+    /// transmission above the barrier and carries no mass prefactor -- pinned
+    /// here so the asymmetry is a documented property rather than a surprise.
+    #[test]
+    fn m_eff_scales_hopping_but_not_ballistic_current() {
+        let heavy_params = DeviceParams {
+            v_ds: 0.1,
+            v_g: 0.4,
+            ..Default::default()
+        };
+        let light_params = DeviceParams {
+            m_eff: heavy_params.m_eff / 4.0,
+            ..heavy_params
+        };
+
+        let mut heavy = Device::new(heavy_params);
+        let mut light = Device::new(light_params);
+        heavy.calc_potential();
+        light.calc_potential();
+
+        // t_hop ~ 1/m_eff: quartering the mass quadruples the hopping.
+        assert_relative_eq!(light.t_hop, 4.0 * heavy.t_hop, max_relative = 1e-12);
+
+        // ...while the ballistic current is mass-independent by construction.
+        assert_relative_eq!(
+            light.calc_current(),
+            heavy.calc_current(),
+            max_relative = 1e-12
+        );
+    }
+
     #[test]
     fn lambda_matches_closed_form() {
         let params = DeviceParams::default();
