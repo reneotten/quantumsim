@@ -146,14 +146,32 @@ impl PyDevice {
             .collect()
     }
 
+    /// Gate-voltage sweep. When `self_consistent` is true, each bias point is
+    /// relaxed with the Poisson<->NEGF loop using the options given here,
+    /// which default to the same values as `solve_self_consistent`.
+    #[pyo3(signature = (
+        v_min, v_max, step, self_consistent=false,
+        max_iterations=50, tolerance=1e-6, mixing=0.3, eta=0.08
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn sweep_v_g(
         &mut self,
         v_min: f64,
         v_max: f64,
         step: f64,
         self_consistent: bool,
+        max_iterations: usize,
+        tolerance: f64,
+        mixing: f64,
+        eta: f64,
     ) -> PyResult<(Vec<f64>, Vec<f64>)> {
-        let opts = SelfConsistentOptions::default();
+        let opts = SelfConsistentOptions {
+            max_iterations,
+            tolerance,
+            mixing,
+            green_energy_fraction: 0.7,
+            eta,
+        };
         let sc = if self_consistent { Some(&opts) } else { None };
         let points = negforge_core::sweep::sweep_v_g(&mut self.inner, v_min, v_max, step, sc)
             .map_err(to_py_err)?;
@@ -163,14 +181,31 @@ impl PyDevice {
         ))
     }
 
+    /// Drain-voltage sweep. See [`Self::sweep_v_g`] for the self-consistency
+    /// options.
+    #[pyo3(signature = (
+        v_min, v_max, step, self_consistent=false,
+        max_iterations=50, tolerance=1e-6, mixing=0.3, eta=0.08
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn sweep_v_ds(
         &mut self,
         v_min: f64,
         v_max: f64,
         step: f64,
         self_consistent: bool,
+        max_iterations: usize,
+        tolerance: f64,
+        mixing: f64,
+        eta: f64,
     ) -> PyResult<(Vec<f64>, Vec<f64>)> {
-        let opts = SelfConsistentOptions::default();
+        let opts = SelfConsistentOptions {
+            max_iterations,
+            tolerance,
+            mixing,
+            green_energy_fraction: 0.7,
+            eta,
+        };
         let sc = if self_consistent { Some(&opts) } else { None };
         let points = negforge_core::sweep::sweep_v_ds(&mut self.inner, v_min, v_max, step, sc)
             .map_err(to_py_err)?;

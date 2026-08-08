@@ -142,14 +142,46 @@ class Device:
         energies, ldos = self._inner.local_density_of_states()
         return np.asarray(energies), np.asarray(ldos)
 
-    def sweep_v_g(self, v_min: float, v_max: float, step: float, self_consistent: bool = False) -> IVCurve:
+    def sweep_v_g(
+        self,
+        v_min: float,
+        v_max: float,
+        step: float,
+        self_consistent: bool = False,
+        max_iterations: int = 50,
+        tolerance: float = 1e-6,
+        mixing: float = 0.3,
+        eta: float = 0.08,
+    ) -> IVCurve:
         """Gate-voltage sweep at the device's current drain bias. Matches
-        `plot_Vg_I`."""
-        voltage, current = self._inner.sweep_v_g(v_min, v_max, step, self_consistent)
+        `plot_Vg_I`.
+
+        When `self_consistent` is true each bias point is relaxed with the
+        Poisson<->NEGF loop; `max_iterations`, `tolerance`, `mixing` and `eta`
+        are forwarded to it and default to the same values as
+        `solve_self_consistent`. Raises `RuntimeError` if any bias point fails
+        to converge.
+        """
+        voltage, current = self._inner.sweep_v_g(
+            v_min, v_max, step, self_consistent, max_iterations, tolerance, mixing, eta
+        )
         return IVCurve(voltage, current)
 
-    def sweep_v_ds(self, v_min: float, v_max: float, step: float, self_consistent: bool = False) -> IVCurve:
+    def sweep_v_ds(
+        self,
+        v_min: float,
+        v_max: float,
+        step: float,
+        self_consistent: bool = False,
+        max_iterations: int = 50,
+        tolerance: float = 1e-6,
+        mixing: float = 0.3,
+        eta: float = 0.08,
+    ) -> IVCurve:
         """Drain-voltage sweep at the device's current gate bias. Matches
-        `plot_Vds_I`."""
-        voltage, current = self._inner.sweep_v_ds(v_min, v_max, step, self_consistent)
+        `plot_Vds_I`. See `sweep_v_g` for the self-consistency options.
+        """
+        voltage, current = self._inner.sweep_v_ds(
+            v_min, v_max, step, self_consistent, max_iterations, tolerance, mixing, eta
+        )
         return IVCurve(voltage, current)
