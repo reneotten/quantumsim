@@ -14,7 +14,7 @@ does.
 
 ## Architecture
 
-```
+``` 
 crates/negforge-core/   Pure-Rust physics engine (no Python dependency)
 crates/negforge-py/     PyO3 bindings, compiled to the native module
                          negforge._negforge
@@ -22,7 +22,7 @@ python/negforge/        Pythonic wrapper package (numpy arrays, keyword
                          device construction, IVCurve helper)
 notebooks/               Jupyter notebook frontend
 legacy_matlab/           Original MATLAB code, kept for reference
-docs/PHYSICS.md          Physics and implementation guide for legacy_matlab/
+docs/PHYSICS.md          Physics & numerics tutorial (Parts I–VIII)
 ```
 
 `negforge-core` has no PyO3/Python dependency at all — it's a normal Rust
@@ -75,6 +75,114 @@ jupyter notebook notebooks/negforge_demo.ipynb
 resulting extension inside the `python/negforge/` package (as
 `negforge._negforge`); `python/negforge/__init__.py` wraps it in a
 friendlier, numpy-returning API (`negforge.Device`, `negforge.IVCurve`).
+
+### Requirements and gotchas
+
+- **Python ≥ 3.9** (`pyproject.toml`), **Rust ≥ 1.70** (2021 edition,
+  `resolver = "2"`). `maturin` is only needed for the Python bindings; the
+  `negforge-core` crate builds with plain `cargo`.
+- **`pip install -e .` rebuilds the extension.** The build backend is
+  maturin, so the `pip install -e ".[notebook]"` step recompiles
+  `negforge._negforge` and replaces whatever `maturin develop` just put
+  there. This is harmless -- it rebuilds in release mode too -- but it is
+  not a no-op, and it means the extras step is the slow one on a cold
+  cache. To install the extras without a rebuild, use
+  `pip install jupyter matplotlib ipywidgets` instead.
+- **The virtualenv is not relocatable.** `.venv` stores absolute paths, so
+  moving or renaming the repository directory breaks `maturin`, `cargo`'s
+  PyO3 interpreter discovery, and the installed console scripts, usually as
+  `Couldn't find any python interpreters` or an `ImportError` on
+  `negforge._negforge`. Recreate it after any move:
+  `rm -rf .venv && python3 -m venv .venv && source .venv/bin/activate && pip install maturin && maturin develop --release`.
+
+## Device parameters
+
+Constructor keywords for `negforge.Device(...)` map one-to-one onto the Rust
+`DeviceParams` fields. Lengths are in nm, energies and potentials in eV,
+temperature in K -- the unit conventions inherited from the original MATLAB
+code.
+
+| Keyword | Unit | Default | Meaning |
+|---|---|---|---|
+| `a` | nm | `0.5` | Real-space grid spacing. Also sets the tight-binding hopping `t_hop = ħ²/(2 m_eff a²)`. |
+| `l_ch` | nm | `40.0` | Channel (gated region) length. |
+| `l_ds` | nm | `40.0` | Source/drain extension length. Ignored unless `auto_size_contacts=False`. |
+| `auto_size_contacts` | — | `True` | Size the contacts as `floor(λ)·15` instead of using `l_ds`, matching the original constructor. |
+| `d_ch` | nm | `5.0` | Channel (body) thickness, enters `λ`. |
+| `d_ox` | nm | `5.0` | Oxide thickness, enters `λ`. |
+| `k_si` | — | `11.2` | Relative permittivity of the channel (silicon). |
+| `k_ox` | — | `3.9` | Relative permittivity of the oxide (SiO₂). |
+| `geo` | — | `1.0` | Gate geometry factor in `λ` (see below). |
+| `v_g` | V | `0.0` | Gate voltage (enters as `Ψ_g = -e·V_g`). |
+| `v_ds` | V | `0.0` | Drain-source voltage. Note the default is **zero bias**, where the ballistic current is identically zero. |
+| `e_f` | eV | `0.15` | Fermi energy used for the mid-gap/built-in potential. |
+| `e_g` | eV | `1.0` | Band gap. |
+| `e_fs` | eV | `0.05` | Source Fermi level. The drain level follows as `e_fd = -v_ds + 0.05`. |
+| `t` | K | `300.0` | Temperature, sets the Fermi-Dirac width. |
+| `d_e` | eV | `0.001` | Energy-grid step for the current integral and the LDOS sweep. |
+| `epsilon` | — | `10e-15` | Fermi-function tolerance bounding the ballistic energy window. |
+| `n_dot` | C/m³ | `0.0` | Fixed ionised-dopant charge added to the Poisson right-hand side (undoped body by default). |
+| `m_eff` | **kg** | `0.9·m_e` | Effective mass. An absolute mass, *not* a ratio — write `m_eff=0.19 * negforge.M_E`. Enters the NEGF hopping only, so it does not change `calc_current()`. |
+
+### Choosing `geo`
+
+`geo` is the gate geometry factor `g` in the natural length
+
+```
+λ = sqrt( (k_si / k_ox) · d_ch · d_ox / g )
+```
+
+More gates means stronger electrostatic control, a shorter `λ`, and less
+short-channel leakage of the source/drain potential into the channel.
+
+| Structure | `geo` |
+|---|---|
+| Single (planar) gate | `1` |
+| Symmetric double gate | `2` |
+
+For a wrap-gate / gate-all-around (GAA) nanowire the coupling is stronger
+still, so `λ` shrinks further — but this `1/g` form is a thin-body
+approximation, and there is no single "correct" `geo` for GAA. The standard
+cylindrical surrounding-gate scale length is not a rescale of the planar
+formula at all: it carries a `ln(1 + 2·t_ox/R)` dependence on the
+oxide-to-radius ratio (Auth & Plummer, *IEEE EDL* **18**, 74, 1997). Treat
+`geo > 2` as a qualitative proxy for "better than double gate", not as a
+quantitative nanowire model.
+
+## Python API
+
+| Call | Returns | Notes |
+|---|---|---|
+| `Device(**params)` | `Device` | See the parameter table above. |
+| `.calc_potential()` | `Device` | Decoupled electrostatic solve (`ρ` unchanged); chainable. |
+| `.solve_self_consistent(max_iterations=50, tolerance=1e-6, mixing=0.3, eta=0.08)` | `(iterations, residual)` | Poisson↔NEGF loop; raises `RuntimeError` if it does not converge. |
+| `.calc_current()` | `float` (A) | Ballistic Landauer current at the current potential. |
+| `.set_v_g(v)` / `.set_v_ds(v)` / `.set_l_ch(l)` | `Device` | Bias/geometry setters; chainable. |
+| `.psi_f` | `ndarray` (eV) | Solved potential-energy profile, one value per grid point. |
+| `.rho` | `ndarray` (**C/m³**) | Charge density entering the electrostatic solve. |
+| `.positions_nm` | `ndarray` (nm) | Grid coordinates. |
+| `.n` / `.a` / `.screening_length` | `int` / `float` (nm) / `float` (nm) | Grid size, spacing, and `λ`. |
+| `.local_density_of_states(eta=1e-8, d_e=None)` | `(energies, ldos)` | Shapes `(nE,)` and `(nE, n)`. The default `eta` is far below `d_e`, giving isolated spikes; pass a few times `d_e` (e.g. `eta=5e-3`) for a smooth map. |
+| `.sweep_v_g(v_min, v_max, step, self_consistent=False, ...)` | `IVCurve` | Self-consistency options are forwarded per bias point. |
+| `.sweep_v_ds(v_min, v_max, step, self_consistent=False, ...)` | `IVCurve` | As above. |
+| `IVCurve.voltage` / `.current` | `ndarray` (V) / `ndarray` (A) | Also unpackable: `v, i = iv`. |
+| `IVCurve.subthreshold_swing(v_min=0.0, v_max=0.4)` | `float` (**V/decade**) | ×1000 for mV/decade; the 300 K limit is 0.0596 V/decade. Requires a non-zero `v_ds`, else raises `ValueError`. |
+| `negforge.M_E` | `float` (kg) | Free-electron mass, for spelling `m_eff`. |
+
+A minimal session:
+
+```python
+import negforge
+
+dev = negforge.Device(v_ds=0.1, v_g=0.3, geo=2.0)   # double gate
+dev.solve_self_consistent()
+print(dev.calc_current(), "A")
+
+iv = negforge.Device(v_ds=0.1).sweep_v_g(0.0, 0.7, 0.05)
+print(iv.subthreshold_swing(0.05, 0.35) * 1000, "mV/decade")
+
+E, ldos = dev.local_density_of_states(eta=5e-3)      # (nE,), (nE, n)
+```
 
 ## Physics model
 
