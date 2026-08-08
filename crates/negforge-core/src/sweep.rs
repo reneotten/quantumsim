@@ -87,10 +87,15 @@ fn linear_fit(x: &[f64], y: &[f64]) -> (f64, f64) {
     (slope, intercept)
 }
 
-/// Subthreshold swing (mV/decade equivalent, in the original's V/decade
-/// units) from a gate-voltage sweep, computed as `1 / slope` of a
-/// `log10(I)` vs `V_g` linear fit over `[fit_v_min, fit_v_max]`. Mirrors
-/// the `polyfit` step inside `plot_Vg_I`.
+/// Subthreshold swing in **volts per decade** of current, computed as
+/// `1 / slope` of a `log10(I)` vs `V_g` linear fit over
+/// `[fit_v_min, fit_v_max]`. Mirrors the `polyfit` step inside `plot_Vg_I`.
+///
+/// Multiply by 1000 for the commonly quoted mV/decade; the thermal limit
+/// `ln(10) k_B T / e` is ~0.0596 V/decade at 300 K. Returns a non-finite
+/// value if any current in the window is non-positive (e.g. a ballistic
+/// sweep at `v_ds = 0`, where the current is identically zero); the Python
+/// wrapper turns that case into an explicit error.
 pub fn subthreshold_swing(points: &[IvPoint], fit_v_min: f64, fit_v_max: f64) -> f64 {
     let (xs, ys): (Vec<f64>, Vec<f64>) = points
         .iter()
