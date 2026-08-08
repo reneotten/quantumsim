@@ -33,14 +33,48 @@ class IVCurve:
         return f"IVCurve({len(self.voltage)} points)"
 
     def subthreshold_swing(self, v_min: float = 0.0, v_max: float = 0.4) -> float:
-        """Subthreshold swing from a `log10(I)` vs voltage linear fit over
-        `[v_min, v_max]`, matching `plot_Vg_I`'s `polyfit` step in the
-        original MATLAB code."""
+        """Subthreshold swing in **volts per decade** of drain current.
+
+        Computed as `1 / slope` of a `log10(I)` vs voltage linear fit over
+        `[v_min, v_max]`, matching `plot_Vg_I`'s `polyfit` step in the original
+        MATLAB code. Multiply by 1000 for the more commonly quoted mV/decade;
+        the room-temperature thermal limit `ln(10) k_B T / e` is about
+        0.0596 V/decade (59.6 mV/decade) at 300 K.
+
+        Requires a sweep taken at non-zero drain bias: at `v_ds = 0` (the
+        `Device` default) the Landauer integrand vanishes, every current is
+        exactly zero, and `log10(0)` is undefined. Rather than returning `nan`
+        from `1/-inf`, this raises `ValueError` so the cause is obvious.
+
+        Raises
+        ------
+        ValueError
+            If fewer than two sweep points fall in `[v_min, v_max]`, if any
+            current in that window is non-positive (typically `v_ds = 0`), or
+            if the fitted slope is zero/degenerate so the swing is undefined.
+        """
         mask = (self.voltage >= v_min) & (self.voltage <= v_max)
         if mask.sum() < 2:
-            raise ValueError("not enough points in [v_min, v_max] to fit a swing")
-        log_i = np.log10(self.current[mask])
-        slope, _ = np.polyfit(self.voltage[mask], log_i, 1)
+            raise ValueError(
+                f"not enough points in [{v_min}, {v_max}] to fit a swing "
+                f"({int(mask.sum())} of {len(self.voltage)} sweep points); "
+                "widen the window or use a finer sweep step"
+            )
+        current = self.current[mask]
+        if np.any(current <= 0.0):
+            n_bad = int(np.sum(current <= 0.0))
+            raise ValueError(
+                f"{n_bad} of {current.size} currents in [{v_min}, {v_max}] are "
+                "non-positive, so log10(I) is undefined. A ballistic sweep at "
+                "v_ds = 0 (the Device default) gives exactly zero current -- "
+                "sweep at a non-zero drain bias, e.g. Device(v_ds=0.1)."
+            )
+        slope, _ = np.polyfit(self.voltage[mask], np.log10(current), 1)
+        if not np.isfinite(slope) or slope == 0.0:
+            raise ValueError(
+                "degenerate log10(I) vs V fit (slope is zero or non-finite); "
+                "the swing is undefined over this window"
+            )
         return 1.0 / slope
 
 
