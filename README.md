@@ -125,19 +125,11 @@ module's doc comments.
   parabolic dispersion only for grid spacings fine enough that the swept
   energy range stays well below the chain's `4*t_hop` bandwidth; worth
   checking via a grid-refinement test at new device scales.
-- **Contact self-energy sign — inherited bug, now fixed.** The original
-  MATLAB's self-energy formula (`sigma = t_hop * exp(i*k*a)`) had the
-  opposite sign from what a causal/absorbing contact requires (`Im(sigma)
-  <= 0`, needed for the broadening `Gamma = -2*Im(sigma)` to be
-  non-negative). This rewrite now uses `sigma = t_hop * exp(-i*k*a)`
-  instead, the algebraically-equivalent-but-correctly-signed form for the
-  wavevector branch this code computes — see `negf.rs` for the full
-  derivation. The fix required no changes to `charge.rs`'s charge-density
-  formula (it only uses `sin(k)`, invariant under the branch/sign fix) and
-  did not change the self-consistent loop's convergence behavior or
-  default `eta`/`mixing` (re-verified after the fix; if anything the loop
-  now converges in fewer iterations, consistent with the contacts being
-  genuinely dissipative rather than borderline non-causal).
+- **Contact self-energy sign.** Causal, absorbing contacts require
+  `Im(sigma) <= 0`, so the implementation uses
+  `sigma = t_hop * exp(-i*k*a)` for the wavevector branch it computes. See
+  `negf.rs` for the derivation. The charge-density calculation uses
+  `sin(k)`, which is invariant under this branch/sign choice.
 - **No explicit spin-degeneracy factor** in the self-consistent charge
   density (unlike `calc_current`'s explicit `2e/h`), carried over unchanged
   from the original `calc_n`, which was never exercised against a
@@ -149,92 +141,14 @@ convergence to a stable, non-negative charge density) — but they mean
 absolute numbers out of this model should be treated as illustrative of
 device physics concepts, not as device-accurate predictions.
 
-## Deviations from the original MATLAB code
+## Implementation differences from the legacy MATLAB code
 
-This is a faithful port plus closing the missing self-consistency loop,
-not a from-scratch physics redesign. Everything below is a deliberate,
-documented decision, not an accident:
-
-1. **Self-consistent Poisson&harr;NEGF loop** (`selfconsistent.rs`). The
-   original computed the electrostatic potential once with `rho = 0` and,
-   separately, an NEGF charge density — but never fed one into the other.
-   This is genuinely new: solve electrostatics, compute the NEGF electron
-   density, convert it to a charge density, damp/mix it into `rho`,
-   re-solve, iterate to convergence (or report a `NotConverged` error
-   rather than silently returning garbage).
-
-2. **Charge-density unit fix** (needed for #1 to be numerically meaningful
-   at all). `calc_potential`'s RHS divides `rho + N_dot` by `EPS_0 *
-   k_si`, with `EPS_0` in SI units (F/m); for that division to land in the
-   same eV/nm^2 ballpark as the model's other terms, `rho` must be a
-   genuine volume charge density in C/m^3. The original never exercised
-   this since `rho` was always zero. The self-consistent loop converts the
-   NEGF electron density (computed in nm^-1, the model's native length
-   unit) to C/m^3 by treating the 1D chain as having an implicit unit (1
-   m^2) cross-section and multiplying by `-e`. Skipping this and feeding a
-   raw, differently-scaled density into `rho` was tried first and made the
-   fixed-point iteration diverge by many orders of magnitude — see the
-   module docs in `charge.rs` and `selfconsistent.rs` for the full
-   derivation.
-
-3. **NEGF broadening (`eta`) inside the self-consistent loop.** The
-   original hardcoded `eta = 1e-8` for a one-off local-density-of-states
-   plot. That's fine for a static plot but not for a feedback loop: a
-   bound-state resonance whose energy happens to land within `eta` of an
-   energy-grid point produces a `|G|^2` spike orders of magnitude larger
-   than neighboring grid points, and feeding that grid-alignment-dependent
-   spike back into the electrostatic solve makes the iteration diverge or
-   oscillate. `SelfConsistentOptions::eta` defaults to `0.08` eV (tuned
-   empirically against the default device geometry — see `negf.rs` module
-   docs), large enough to resolve resonances smoothly across iterations.
-   The original's small `eta = 1e-8` is preserved as `negf::DEFAULT_ETA`
-   for the standalone, non-self-consistent `local_density_of_states` /
-   LDOS-plot path, where the original's sharp-peak behavior is what you
-   want to see.
-
-4. **Two `calc_n()` bug fixes** (`charge.rs`), needed for the
-   self-consistent charge density to respond to the actual physics rather
-   than being a constant:
-   - The original multiplies the whole energy sum by a single scalar
-     `f(E_fs)` / `f(E_fd)` (evaluated once, outside the sum) instead of the
-     energy-dependent Fermi occupation `f_s(E)` / `f_d(E)` used everywhere
-     else in the model (e.g. `calc_current`). Fixed to use the proper
-     per-energy weight.
-   - The original reuses one `mask = E > Psi_f(1)` (the *source* band
-     edge) for both the source and drain contact terms. Each contact's
-     contribution is now masked by its own band edge, consistent with how
-     `calc_green` already conditions each contact's self-energy on its own
-     band edge.
-
-5. **O(N) NEGF instead of O(N^3).** See "Architecture" above. Purely a
-   performance change (validated against a dense reference solver in
-   tests); the physics is unchanged.
-
-6. **Contact self-energy sign fix** (`negf.rs`). The original's
-   `t*exp(1i*k_sa)` self-energy had `Im(sigma) > 0` for propagating contact
-   modes — the wrong sign for a causal, absorbing lead (which requires
-   `Im(sigma) <= 0`). This surfaced as the local-density-of-states proxy
-   `g_diag` going materially negative at the broadening used inside the
-   self-consistent loop, which a correctly causal calculation cannot do.
-   Fixed to `t*exp(-1i*k_sa)`, which is exactly the standard textbook
-   self-energy for the wavevector branch this code computes (see `negf.rs`
-   for the derivation) — confirmed by two regression tests
-   (`contact_self_energy_has_non_positive_imaginary_part_for_propagating_modes`,
-   `g_diag_is_non_negative_at_self_consistent_loop_broadening`). The
-   self-consistent charge density (`charge::electron_density`) was already
-   structurally non-negative before this fix (it only uses squared
-   Green's-function magnitudes), so this fix changes the *quantitative*
-   values of the NEGF Green's functions (and hence the charge density and
-   any LDOS plots) but not their sign or the qualitative device trends.
-
-Everything else — the electrostatic operator, the ballistic current
-formula, the general unit handling (nm/eV/K) — is a direct, unmodified
-port. In particular, the model's overall dimensional consistency is
-inherited as-is from the original teaching code (e.g. the electrostatic
-equation isn't a fully rigorous SI-unit Poisson equation); this rewrite
-does not attempt to re-derive the model's physics from first principles,
-only to make it run, close its one clearly-missing feedback loop, and fix
-the bugs that stood in the way of that loop actually doing something.
+The Rust implementation closes the electrostatics/charge feedback loop, fixes
+the charge-density occupation and contact-mask calculations, and replaces the
+dense NEGF solve with O(N) tridiagonal and recursive Green's-function methods.
+It also uses a finite NEGF broadening during self-consistent iterations to
+avoid grid-aligned resonances destabilizing the loop. The detailed rationale
+and validation live in the module documentation and test suite.
 
 ## Testing
 
